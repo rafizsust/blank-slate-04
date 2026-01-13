@@ -217,6 +217,28 @@ serve(async (req) => {
     } else {
       console.log(`[evaluate-speaking-async] Creating new job for test ${testId}, ${Object.keys(filePaths).length} files`);
 
+      // CANCEL any pending/processing jobs for this user and test to prevent duplicate evaluations
+      const { data: existingJobs } = await supabaseService
+        .from('speaking_evaluation_jobs')
+        .select('id, status')
+        .eq('user_id', user.id)
+        .eq('test_id', testId)
+        .in('status', ['pending', 'processing']);
+
+      if (existingJobs && existingJobs.length > 0) {
+        console.log(`[evaluate-speaking-async] Cancelling ${existingJobs.length} existing jobs for test ${testId}`);
+        await supabaseService
+          .from('speaking_evaluation_jobs')
+          .update({
+            status: 'failed',
+            last_error: 'Cancelled: User submitted a new evaluation request.',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('user_id', user.id)
+          .eq('test_id', testId)
+          .in('status', ['pending', 'processing']);
+      }
+
       // Create job record in database (triggers realtime for frontend)
       const { data: newJob, error: jobError } = await supabaseService
         .from('speaking_evaluation_jobs')
@@ -415,23 +437,38 @@ async function runEvaluation(
     return a.questionNumber - b.questionNumber;
   });
 
-  // ============ DOWNLOAD FILES FROM R2 ============
-  console.log('[runEvaluation] Downloading audio files from R2...');
+  // ============ DOWNLOAD FILES FROM R2 IN CORRECT ORDER ============
+  // CRITICAL: Files MUST be downloaded and uploaded to Google File API in the EXACT same order
+  // as orderedSegments. Otherwise Gemini will mismatch transcripts to questions.
+  console.log('[runEvaluation] Downloading audio files from R2 IN ORDER OF orderedSegments...');
+  
   const audioFiles: { key: string; bytes: Uint8Array; mimeType: string }[] = [];
-
-  for (const [audioKey, r2Path] of Object.entries(file_paths as Record<string, string>)) {
+  
+  // Build a lookup map for file_paths
+  const filePathsMap = file_paths as Record<string, string>;
+  
+  // Download in the EXACT order of orderedSegments to guarantee consistency
+  for (const segment of orderedSegments) {
+    const audioKey = segment.segmentKey;
+    const r2Path = filePathsMap[audioKey];
+    
+    if (!r2Path) {
+      console.warn(`[runEvaluation] No R2 path for segment: ${audioKey}, skipping`);
+      continue;
+    }
+    
     try {
-      console.log(`[runEvaluation] Downloading from R2: ${r2Path}`);
-      const result = await getFromR2(r2Path as string);
+      console.log(`[runEvaluation] Downloading Part ${segment.partNumber} Q${segment.questionNumber}: ${r2Path}`);
+      const result = await getFromR2(r2Path);
       if (!result.success || !result.bytes) {
         throw new Error(`Failed to download: ${result.error}`);
       }
       
-      const ext = (r2Path as string).split('.').pop()?.toLowerCase() || 'webm';
+      const ext = r2Path.split('.').pop()?.toLowerCase() || 'webm';
       const mimeType = ext === 'mp3' ? 'audio/mpeg' : 'audio/webm';
       
       audioFiles.push({ key: audioKey, bytes: result.bytes, mimeType });
-      console.log(`[runEvaluation] Downloaded: ${r2Path} (${result.bytes.length} bytes)`);
+      console.log(`[runEvaluation] Downloaded [${audioFiles.length}] Part ${segment.partNumber} Q${segment.questionNumber}: ${r2Path} (${result.bytes.length} bytes)`);
     } catch (e) {
       console.error(`[runEvaluation] Download error for ${audioKey}:`, e);
     }
@@ -725,35 +762,81 @@ function buildPrompt(
 
   const numQ = orderedSegments.length;
 
-  return `You are a SENIOR IELTS Speaking examiner with 15+ years experience. Return ONLY valid JSON, no markdown.
+  return `You are a CERTIFIED SENIOR IELTS Speaking Examiner with 20+ years of examination experience.
+You MUST evaluate exactly as an official IELTS examiner would during a real exam.
+Return ONLY valid JSON, no markdown, no explanations outside JSON.
 
 CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}, Parts: ${partsDescription}, Questions: ${numQ}
-${fluencyFlag ? '⚠️ Part 2 under 80s - penalize Fluency & Coherence.' : ''}
+${fluencyFlag ? '⚠️ Part 2 speaking time under 80 seconds - apply appropriate fluency penalty per IELTS guidelines.' : ''}
 
-MANDATORY REQUIREMENTS:
-1. Listen to ALL ${numQ} audio files and transcribe EACH one fully
-2. Provide band scores (use "band" key, not "score") for ALL 4 criteria
-3. Create modelAnswers array with EXACTLY ${numQ} entries - one for each audio
-4. Include transcripts_by_question with ALL ${numQ} question transcripts
-5. All band scores must be between 1.0 and 9.0 (not zero!)
+══════════════════════════════════════════════════════════════
+AUDIO-TO-QUESTION MAPPING - FOLLOW THIS EXACTLY (NO DEVIATION!)
+══════════════════════════════════════════════════════════════
+The audio files are provided IN STRICT ORDER corresponding to this segment map:
+${segmentJson}
 
-EXPERT EXAMINER OBSERVATIONS (CRITICAL):
-1. **Repetition Detection**: Identify if the candidate excessively repeats the same words, phrases, or sentence structures across multiple answers.
-2. **Relevance & Topic Adherence**: Assess whether the candidate actually answers the question asked.
-3. **Response Coherence**: Evaluate if responses make logical sense.
+Audio file 1 = segment_map index 0
+Audio file 2 = segment_map index 1
+Audio file 3 = segment_map index 2
+... and so on.
 
-SCORING:
-- Short responses (1-10 words) = Band 4.0-4.5 max
-- Off-topic/irrelevant responses = Penalize Fluency & Coherence
-- Excessive repetition = Penalize Lexical Resource
-- Overall band = weighted average (Part2 x2.0, Part3 x1.5, Part1 x1.0)
+DO NOT reorder, swap, or guess which audio belongs to which question.
+The mapping is FIXED and SEQUENTIAL. Transcript audio file N to segment_map[N].
 
-MODEL ANSWERS - WORD COUNT REQUIREMENTS (CRITICAL):
-- Part 1 answers: ~75 words each (conversational, natural response)
-- Part 2 answers: ~300 words (full long-turn response with all cue card points)
-- Part 3 answers: ~150 words each (extended discussion with reasoning)
+══════════════════════════════════════════════════════════════
+OFFICIAL IELTS BAND DESCRIPTOR STANDARDS (MANDATORY)
+══════════════════════════════════════════════════════════════
 
-EXACT JSON SCHEMA (follow precisely):
+FLUENCY AND COHERENCE (FC):
+- Band 9: Speaks fluently with only rare repetition or self-correction; hesitation is content-related
+- Band 7: Speaks at length without noticeable effort or loss of coherence; may demonstrate language-related hesitation at times
+- Band 5: Usually maintains flow of speech but uses repetition, self-correction and/or slow speech
+- Band 4: Cannot respond without noticeable pauses; may speak slowly with frequent repetition
+
+LEXICAL RESOURCE (LR):
+- Band 9: Uses vocabulary with full flexibility and precision; uses idiomatic language naturally
+- Band 7: Uses vocabulary resource flexibly; uses some less common/idiomatic vocabulary skillfully
+- Band 5: Manages to talk about topics but uses limited vocabulary; may make noticeable pauses to search for words
+- Band 4: Uses basic vocabulary which may be used repetitively or inappropriate for the topic
+
+GRAMMATICAL RANGE AND ACCURACY (GRA):
+- Band 9: Uses a full range of structures naturally and appropriately; produces consistently accurate structures
+- Band 7: Uses a range of complex structures with some flexibility; frequently produces error-free sentences
+- Band 5: Produces basic sentence forms with reasonable accuracy; uses a limited range of more complex structures
+- Band 4: Produces basic sentence forms and some correct simple sentences but subordinate structures are rare
+
+PRONUNCIATION (P):
+- Band 9: Uses a full range of pronunciation features with precision and subtlety; sustains flexible use throughout
+- Band 7: Shows all positive features of Band 6 and some of Band 8; may still be influenced by L1
+- Band 5: Shows all positive features of Band 4 but some features of Band 6; may mispronounce individual words
+- Band 4: Uses a limited range of pronunciation features; mispronunciations are frequent
+
+SCORING GUIDELINES (STRICT IELTS STANDARDS):
+- Short/minimal responses (under 15 words): Maximum Band 4.0-4.5
+- Off-topic/irrelevant content: Severe penalty to FC (1-2 bands below actual fluency)
+- Excessive repetition of words/phrases: Penalize LR appropriately
+- No response or "I don't know" only: Band 1.0-2.0
+- Part 2 must be evaluated holistically - content quality matters more than word count
+- If candidate fully addresses cue card with excellent vocabulary but speaks concisely, do NOT penalize
+
+HOLISTIC EVALUATION (CRITICAL):
+- Evaluate the QUALITY of response, not just quantity
+- A brilliant 200-word Part 2 answer that fully addresses the topic can score Band 8+
+- A rambling 400-word Part 2 that lacks coherence may score Band 5-6
+- Focus on: appropriateness, accuracy, range, and naturalness
+
+MODEL ANSWERS WORD COUNT GUIDELINES:
+- Part 1: ~75 words (natural conversational response)
+- Part 2: ~250-300 words (comprehensive long-turn with all cue card points)
+- Part 3: ~100-150 words (reasoned discussion response)
+
+MANDATORY OUTPUT REQUIREMENTS:
+1. Transcribe ALL ${numQ} audio files ACCURATELY in the EXACT order they appear
+2. Each modelAnswers entry MUST have the correct segment_key matching the input
+3. Include band scores (using "band" key) for ALL 4 criteria (1.0-9.0 range)
+4. Overall band = weighted average: Part 2 × 2.0, Part 3 × 1.5, Part 1 × 1.0
+
+EXACT JSON SCHEMA:
 {
   "overall_band": 6.0,
   "criteria": {
@@ -762,13 +845,15 @@ EXACT JSON SCHEMA (follow precisely):
     "grammatical_range": {"band": 5.5, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "pronunciation": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]}
   },
-  "summary": "2-4 sentence overall performance summary",
-  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example sentence"}],
+  "summary": "Overall performance summary highlighting key strengths and areas for improvement",
+  "lexical_upgrades": [{"original": "word", "upgraded": "better_word", "context": "usage example"}],
   "part_analysis": [{"part_number": 1, "performance_notes": "...", "key_moments": [...], "areas_for_improvement": [...]}],
   "improvement_priorities": ["Priority 1: ...", "Priority 2: ..."],
-  "transcripts_by_part": {"1": "Full transcript for Part 1..."},
+  "transcripts_by_part": {"1": "Full Part 1 transcript...", "2": "Full Part 2 transcript...", "3": "Full Part 3 transcript..."},
   "transcripts_by_question": {
-    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "..."}]
+    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "exact transcription"}],
+    "2": [{"segment_key": "part2-q...", "question_number": 1, "question_text": "...", "transcript": "exact transcription"}],
+    "3": [{"segment_key": "part3-q...", "question_number": 1, "question_text": "...", "transcript": "exact transcription"}]
   },
   "modelAnswers": [
     {
@@ -776,21 +861,21 @@ EXACT JSON SCHEMA (follow precisely):
       "partNumber": 1,
       "questionNumber": 1,
       "question": "Question text",
-      "candidateResponse": "Full transcript of candidate's answer",
+      "candidateResponse": "EXACT transcript of what candidate said",
       "estimatedBand": 5.5,
       "targetBand": 6,
-      "modelAnswer": "A comprehensive model answer (~75 words for Part1, ~300 words for Part2, ~150 words for Part3)...",
-      "whyItWorks": ["Uses topic-specific vocabulary", "Clear organization"],
-      "keyImprovements": ["Add more examples", "Vary vocabulary"]
+      "modelAnswer": "Model answer following word count guidelines",
+      "whyItWorks": ["Uses topic-specific vocabulary", "Clear structure"],
+      "keyImprovements": ["Specific improvement 1", "Specific improvement 2"]
     }
   ]
 }
 
-INPUT DATA:
+INPUT DATA (${numQ} questions to evaluate):
 questions_json: ${questionJson}
-segment_map_json (${numQ} segments to evaluate): ${segmentJson}
+segment_map_json (AUDIO FILES ARE IN THIS EXACT ORDER): ${segmentJson}
 
-CRITICAL: You MUST return exactly ${numQ} entries in modelAnswers array. Follow the word count guidelines for each part.`;
+FINAL REMINDER: Audio file order is FIXED. Do NOT swap transcripts between questions. Return exactly ${numQ} modelAnswers entries with correct segment_keys.`;
 }
 
 function parseJson(text: string): any {
