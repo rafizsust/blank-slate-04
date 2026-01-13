@@ -1,32 +1,19 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
+import { GoogleAIFileManager } from "https://esm.sh/@google/generative-ai@0.21.0/server";
+import { GoogleGenerativeAI } from "https://esm.sh/@google/generative-ai@0.21.0";
 import { 
   getActiveGeminiKeysForModel, 
-  markKeyQuotaExhausted
+  markKeyQuotaExhausted,
+  isQuotaExhaustedError
 } from "../_shared/apiKeyQuotaUtils.ts";
+import { getFromR2 } from "../_shared/r2Client.ts";
+import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-gemini-api-key',
 };
-
-function parseDataUrl(value: string): { mimeType: string; base64: string } {
-  if (!value) return { mimeType: 'audio/webm', base64: '' };
-
-  if (value.startsWith('data:')) {
-    const commaIdx = value.indexOf(',');
-    const header = commaIdx >= 0 ? value.slice(5, commaIdx) : value.slice(5);
-    const base64 = commaIdx >= 0 ? value.slice(commaIdx + 1) : '';
-
-    const semiIdx = header.indexOf(';');
-    const mimeType = (semiIdx >= 0 ? header.slice(0, semiIdx) : header).trim() || 'audio/webm';
-
-    return { mimeType, base64 };
-  }
-
-  return { mimeType: 'audio/webm', base64: value };
-}
 
 // ============================================================================
 // CREDIT SYSTEM - Cost Map and Daily Limits
@@ -54,10 +41,19 @@ interface ApiKeyRecord {
   error_count: number;
 }
 
-// Fetch active Gemini keys from api_keys table with quota filtering
-async function getActiveGeminiKeys(serviceClient: any): Promise<ApiKeyRecord[]> {
-  // Use the shared utility that filters out quota-exhausted keys for 'flash' model type
-  return await getActiveGeminiKeysForModel(serviceClient, 'flash');
+// Model priority configuration (Fastest + Free first)
+const GEMINI_MODELS = [
+  'gemini-1.5-flash',      // Primary (Fast, free tier friendly)
+  'gemini-2.0-flash-exp',  // Secondary
+  'gemini-1.5-pro',        // Fallback (More capable)
+];
+
+// Custom error class for quota exhaustion
+class QuotaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QuotaError';
+  }
 }
 
 // Check credits (returns error if limit reached)
@@ -135,17 +131,255 @@ async function deductCredits(serviceClient: any, userId: string, operationType: 
   }
 }
 
-// List of Gemini models in fallback order, prioritizing audio-capable models
-const GEMINI_MODELS_FALLBACK_ORDER = [
-  'gemini-1.5-pro', // Primary (Best)
-  'gemini-1.5-flash', // Alternatives (Good)
-  'gemini-pro-latest', // Alternatives (Good)
-  'gemini-flash-latest', // Alternatives (Good)
-  'gemini-exp-1206', // Alternatives (Good)
-  'gemini-3-pro-preview', // Backup Options
-  'gemini-2.0-flash-exp', // Backup Options
-  'gemini-2.0-flash', // Backup Options
-];
+// Download audio from R2 and save to temp storage
+async function downloadAudioFromR2(filePath: string): Promise<{ tempPath: string; mimeType: string }> {
+  console.log(`[evaluate-speaking] Downloading from R2: ${filePath}`);
+  
+  const result = await getFromR2(filePath);
+  if (!result.success || !result.bytes) {
+    throw new Error(`Failed to download audio from R2: ${result.error}`);
+  }
+  
+  const tempPath = `/tmp/${crypto.randomUUID()}.webm`;
+  await Deno.writeFile(tempPath, result.bytes);
+  
+  console.log(`[evaluate-speaking] Saved to temp: ${tempPath} (${result.bytes.length} bytes)`);
+  return { tempPath, mimeType: result.contentType || 'audio/webm' };
+}
+
+// Build the evaluation prompt
+function buildEvaluationPrompt(test: any, questionGroups: any[], fileUris: { uri: string; mimeType: string; key: string }[]): any[] {
+  const contents: any[] = [];
+
+  // Initial instruction for Gemini
+  contents.push({
+    role: 'user',
+    parts: [{
+      text: `You are an OFFICIAL IELTS Speaking examiner following the Cambridge/British Council 2025 assessment standards. Your task is to evaluate the candidate's speaking performance using the EXACT official IELTS Band Descriptors.
+
+    It is CRUCIAL that you:
+    1. Listen carefully to the actual audio recordings
+    2. Score STRICTLY according to official IELTS criteria - DO NOT inflate scores
+    3. If audio is silent or has no speech, score 0 for all criteria
+    
+    **When providing feedback, use markdown for emphasis.**
+
+    ---
+    **IELTS Speaking Test: ${test.name}**
+    ${test.description ? `Description: ${test.description}` : ''}
+    ---
+
+    === OFFICIAL IELTS BAND DESCRIPTORS (Apply Strictly) ===
+    
+    FLUENCY AND COHERENCE:
+    - Band 9: Speaks fluently with only very occasional repetition; develops topics fully and appropriately
+    - Band 7: Speaks at length without noticeable effort; uses a range of connectives with flexibility
+    - Band 5: Usually maintains flow but uses repetition/self-correction; over-uses certain connectives
+    - Band 3: Speaks with long pauses; limited ability to link sentences
+    - Band 0: No speech detected
+    
+    LEXICAL RESOURCE:
+    - Band 9: Uses vocabulary with full flexibility and precision; idiomatic language naturally
+    - Band 7: Uses vocabulary flexibly; some less common/idiomatic vocabulary with awareness of style
+    - Band 5: Manages familiar/unfamiliar topics but limited flexibility; mixed paraphrase success
+    - Band 3: Simple vocabulary for personal info; insufficient for unfamiliar topics
+    - Band 0: No speech detected
+    
+    GRAMMATICAL RANGE AND ACCURACY:
+    - Band 9: Full range of structures naturally; consistently accurate
+    - Band 7: Range of complex structures with flexibility; frequently error-free sentences
+    - Band 5: Basic sentence forms with reasonable accuracy; complex structures contain errors
+    - Band 3: Attempts basic forms with limited success; numerous errors
+    - Band 0: No speech detected
+    
+    PRONUNCIATION:
+    - Band 9: Full range of features with precision; effortless to understand
+    - Band 7: Wide range of features; easy to understand; minimal L1 interference
+    - Band 5: Mixed control of features; generally understood but mispronunciations occur
+    - Band 3: Limited features; frequent mispronunciations cause difficulty
+    - Band 0: No speech detected
+    
+    === SCORING RULES ===
+    - Score each criterion INDEPENDENTLY based on the evidence
+    - Most candidates score 5.0-7.0; Band 8+ requires exceptional performance
+    - Overall band = arithmetic mean of 4 criteria, rounded to nearest 0.5
+    - Minimal responses (1-3 words) = Max Band 3-4
+    - No speech = Band 0
+    `
+    }]
+  });
+
+  // Add parts and questions with their corresponding audio file references
+  questionGroups?.forEach(group => {
+    contents.push({ role: 'user', parts: [{ text: `\n**Part ${group.part_number}: ${group.part_number === 1 ? 'Introduction and Interview' : group.part_number === 2 ? 'Individual Long Turn (Cue Card)' : 'Two-way Discussion'}**\n` }] });
+    if (group.instruction) {
+      contents.push({ role: 'user', parts: [{ text: `Instructions: "${group.instruction}"\n` }] });
+    }
+
+    if (group.part_number === 2) {
+      if (group.cue_card_topic) contents.push({ role: 'user', parts: [{ text: `Cue Card Topic: "${group.cue_card_topic}"\n` }] });
+      if (group.cue_card_content) contents.push({ role: 'user', parts: [{ text: `Cue Card Content: "${group.cue_card_content}"\n` }] });
+      contents.push({ role: 'user', parts: [{ text: `Preparation Time: ${group.preparation_time_seconds} seconds, Speaking Time: ${group.speaking_time_seconds} seconds.\n` }] });
+      
+      const part2Question = group.speaking_questions?.[0];
+      if (part2Question) {
+        const audioKey = `part${group.part_number}-q${part2Question.id}`;
+        const fileRef = fileUris.find(f => f.key === audioKey);
+        
+        if (fileRef) {
+          contents.push({ role: 'user', parts: [{ text: `Your Audio Response for Part 2 (Topic: "${part2Question.question_text}"):\n` }] });
+          contents.push({ role: 'user', parts: [{ fileData: { mimeType: fileRef.mimeType, fileUri: fileRef.uri } }] });
+          contents.push({ role: 'user', parts: [{ text: `Please provide a transcript for the above audio for Part 2, using the key "${audioKey}" in the "transcripts" object of the final JSON output. If the audio is silent or contains no speech, indicate "No speech detected" and give a band score of 0 for that part.` }] });
+        } else {
+          contents.push({ role: 'user', parts: [{ text: `You did not provide audio for Part 2. Score this as 0.\n` }] });
+        }
+      }
+    } else {
+      group.speaking_questions?.forEach((question: any) => {
+        contents.push({ role: 'user', parts: [{ text: `\nQuestion ${question.question_number}: "${question.question_text}"\n` }] });
+        const audioKey = `part${group.part_number}-q${question.id}`;
+        const fileRef = fileUris.find(f => f.key === audioKey);
+        
+        if (fileRef) {
+          contents.push({ role: 'user', parts: [{ text: `Your Audio Response for Question ${question.question_number}:\n` }] });
+          contents.push({ role: 'user', parts: [{ fileData: { mimeType: fileRef.mimeType, fileUri: fileRef.uri } }] });
+          contents.push({ role: 'user', parts: [{ text: `Please provide a transcript for the above audio for Question ${question.question_number}, using the key "${audioKey}" in the "transcripts" object of the final JSON output. If the audio is silent or contains no speech, indicate "No speech detected" and give a band score of 0 for that question.` }] });
+        } else {
+          contents.push({ role: 'user', parts: [{ text: `You did not provide audio for Question ${question.question_number}. Score this as 0.\n` }] });
+        }
+      });
+    }
+  });
+
+  // Final evaluation request
+  contents.push({
+    role: 'user',
+    parts: [{
+      text: `\n---
+    **Evaluation Criteria:**
+
+    1.  **Fluency and Coherence**:
+        -   **Band**: [0-9, in 0.5 increments]
+        -   **Strengths**: What you did well in speaking smoothly, logically, and connecting ideas.
+        -   **Weaknesses**: Areas where your pauses, repetition, or unclear connections could be improved.
+        -   **Suggestions for Improvement**: Actionable advice to enhance your fluency and coherence.
+    2.  **Lexical Resource**:
+        -   **Band**: [0-9, in 0.5 increments]
+        -   **Strengths**: What you did well in using a range of vocabulary accurately and appropriately.
+        -   **Weaknesses**: Areas where your vocabulary could be more varied, precise, or natural.
+        -   **Suggestions for Improvement**: Advice on expanding your vocabulary and using less common lexical items effectively.
+    3.  **Grammatical Range and Accuracy**:
+        -   **Band**: [0-9, in 0.5 increments]
+        -   **Strengths**: What you did well in using a variety of grammatical structures accurately.
+        -   **Weaknesses**: Common errors or areas where your grammatical control could be improved.
+        -   **Suggestions for Improvement**: Advice to enhance your grammatical range and accuracy.
+    4.  **Pronunciation**:
+        -   **Band**: [0-9, in 0.5 increments]
+        -   **Strengths**: What you did well in producing clear, understandable speech with appropriate intonation and stress.
+        -   **Weaknesses**: Areas where your pronunciation, intonation, or stress patterns could be improved for clarity.
+        -   **Suggestions for Improvement**: Advice to improve your pronunciation for better intelligibility.
+
+    **Part-by-Part Analysis:**
+    Provide a brief summary of performance for each part, highlighting specific strengths and weaknesses observed in that part.
+
+    -   **Part 1: Introduction & Interview**
+        -   **Summary**: Overall impression of Part 1.
+        -   **Strengths**: Specific examples of good performance.
+        -   **Weaknesses**: Specific areas for improvement.
+    -   **Part 2: Individual Long Turn**
+        -   **Topic Coverage**: How well the topic was addressed.
+        -   **Organization Quality**: Structure and flow of the long turn.
+        -   **Cue Card Fulfillment**: How well all parts of the cue card were covered.
+    -   **Part 3: Two-way Discussion**
+        -   **Depth of Discussion**: Ability to discuss abstract ideas and elaborate.
+        -   **Question Notes**: Any specific observations on handling Part 3 questions.
+
+    **Overall Recommendations:**
+    -   **Improvement Recommendations**: A list of general actionable advice and strategies you can use to improve overall speaking.
+    -   **Strengths to Maintain**: A list of key strengths you should continue to leverage.
+    -   **Examiner Notes (Optional)**: Any additional general comments.
+
+    Format your response as a JSON object with the following structure:
+    {
+      "overall_band": number,
+      "evaluation_report": {
+        "fluency_coherence": {
+          "band": number,
+          "strengths": string,
+          "weaknesses": string,
+          "suggestions_for_improvement": string
+        },
+        "lexical_resource": {
+          "band": number,
+          "strengths": string,
+          "weaknesses": string,
+          "suggestions_for_improvement": string
+        },
+        "grammatical_range_accuracy": {
+          "band": number,
+          "strengths": string,
+          "weaknesses": string,
+          "suggestions_for_improvement": string
+        },
+        "pronunciation": {
+          "band": number,
+          "strengths": string,
+          "weaknesses": string,
+          "suggestions_for_improvement": string
+        },
+        "part_by_part_analysis": {
+          "part1": {
+            "summary": string,
+            "strengths": string,
+            "weaknesses": string
+          },
+          "part2": {
+            "topic_coverage": string,
+            "organization_quality": string,
+            "cue_card_fulfillment": string
+          },
+          "part3": {
+            "depth_of_discussion": string,
+            "question_notes": string
+          }
+        },
+        "improvement_recommendations": string[],
+        "strengths_to_maintain": string[],
+        "examiner_notes": string,
+        "modelAnswers": [
+          {"partNumber": number, "question": string, "candidateResponse": string, "modelAnswerBand6": string, "modelAnswerBand7": string, "modelAnswerBand8": string, "modelAnswerBand9": string, "whyBand6Works": string[], "whyBand7Works": string[], "whyBand8Works": string[], "whyBand9Works": string[]}
+        ],
+        "transcripts": {
+          "part1-q[question_id_1]": "Transcript for Part 1 Question 1",
+          "part1-q[question_id_2]": "Transcript for Part 1 Question 2",
+          "part2-q[part2_question_id]": "Transcript for Part 2 long turn",
+          "part3-q[question_id_1]": "Transcript for Part 3 Question 1"
+        }
+      }
+    }
+    
+    CRITICAL MANDATORY REQUIREMENTS FOR MODEL ANSWERS:
+    1. The "modelAnswers" array MUST contain an entry for EVERY question from ALL parts - NO EXCEPTIONS.
+    2. Each entry MUST include ALL FOUR band levels: modelAnswerBand6, modelAnswerBand7, modelAnswerBand8, modelAnswerBand9.
+    3. Each entry MUST include ALL FOUR whyBandXWorks arrays: whyBand6Works, whyBand7Works, whyBand8Works, whyBand9Works.
+    4. NEVER skip or omit any band level - all four are MANDATORY for every question.
+    5. If any band level is missing, the response will be REJECTED and must be regenerated.
+    6. Each whyBandXWorks array should have 2-4 specific reasons.
+    
+    MANDATORY WORD COUNT REQUIREMENTS FOR MODEL ANSWERS (STRICT - REGARDLESS OF CANDIDATE RESPONSE LENGTH):
+    - Part 1 model answers: 60-85 words per question (natural, conversational with examples)
+    - Part 2 model answers: 260-340 words (comprehensive long turn with all cue card points covered)
+    - Part 3 model answers: 130-170 words per question (in-depth discussion with reasoning and examples)
+    These word counts are MINIMUM STANDARDS. Even if the candidate gave a very short response, YOUR model answers MUST meet these lengths.
+    Model answers should demonstrate ideal response structure and vocabulary for each band level.
+    
+    Ensure your response is ONLY the JSON object, with no additional text or markdown formatting outside of the JSON itself.
+    `
+    }]
+  });
+
+  return contents;
+}
 
 // @ts-ignore
 serve(async (req) => {
@@ -176,26 +410,24 @@ serve(async (req) => {
       });
     }
 
-    const { submissionId, audioData } = await req.json(); // Receive audioData
+    const { submissionId, filePaths } = await req.json();
 
-    if (!submissionId || !audioData) {
-      console.error('Edge Function: Missing submissionId or audioData in request body.');
-      return new Response(JSON.stringify({ error: 'Missing submissionId or audioData', code: 'BAD_REQUEST' }), {
+    if (!submissionId || !filePaths) {
+      console.error('Edge Function: Missing submissionId or filePaths in request body.');
+      return new Response(JSON.stringify({ error: 'Missing submissionId or filePaths', code: 'BAD_REQUEST' }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    console.log('Edge Function: Received audioData object:', JSON.stringify(audioData, null, 2)); // NEW LOG
-    const receivedAudioKeys = Object.keys(audioData); // Get keys once
-    console.log('Edge Function: Received audioData keys:', receivedAudioKeys); // Updated log
+    console.log('[evaluate-speaking] Received filePaths:', Object.keys(filePaths));
 
-    // 1. Fetch submission details (no longer need transcripts from here)
+    // 1. Fetch submission details
     const { data: submission, error: submissionError } = await supabaseClient
       .from('speaking_submissions')
       .select('test_id, user_id')
       .eq('id', submissionId)
-      .eq('user_id', user.id) // Ensure user owns the submission
+      .eq('user_id', user.id)
       .single();
 
     if (submissionError || !submission) {
@@ -205,7 +437,7 @@ serve(async (req) => {
       });
     }
 
-    // 2. Fetch the associated test details to get instructions/topics
+    // 2. Fetch the associated test details
     const { data: test, error: testError } = await supabaseClient
       .from('speaking_tests')
       .select('name, description')
@@ -222,14 +454,13 @@ serve(async (req) => {
     // 3. Fetch question groups and questions for context
     const { data: questionGroups, error: groupsError } = await supabaseClient
       .from('speaking_question_groups')
-      .select('part_number, instruction, cue_card_topic, cue_card_content, time_limit_seconds, preparation_time_seconds, speaking_time_seconds, speaking_questions(question_number, question_text, order_index, id)') // Added id to speaking_questions
+      .select('part_number, instruction, cue_card_topic, cue_card_content, time_limit_seconds, preparation_time_seconds, speaking_time_seconds, speaking_questions(question_number, question_text, order_index, id)')
       .eq('test_id', submission.test_id)
       .order('part_number')
       .order('order_index', { foreignTable: 'speaking_questions' });
 
     if (groupsError) {
       console.warn('Could not fetch question groups for speaking evaluation context:', groupsError.message);
-      // Continue without groups if there's an error, but log it.
     }
 
     // Service client for credit operations
@@ -240,14 +471,19 @@ serve(async (req) => {
 
     const appEncryptionKey = Deno.env.get('app_encryption_key');
 
-    // ============ HYBRID KEY PRIORITY SYSTEM ============
+    // ============ BUILD API KEY QUEUE (Atomic Session Logic) ============
+    interface KeyCandidate {
+      key: string;
+      keyId: string | null;
+      isUserProvided: boolean;
+    }
+
+    const keyQueue: KeyCandidate[] = [];
+
+    // 1. Check for user-provided key (header or user_secrets)
     const headerApiKey = req.headers.get('x-gemini-api-key');
-    let geminiApiKey: string | null = null;
-    let isUserProvidedKey = false;
-    
     if (headerApiKey) {
-      geminiApiKey = headerApiKey;
-      isUserProvidedKey = true;
+      keyQueue.push({ key: headerApiKey, keyId: null, isUserProvided: true });
     } else {
       const { data: userSecret } = await supabaseClient
         .from('user_secrets')
@@ -257,356 +493,175 @@ serve(async (req) => {
         .single();
 
       if (userSecret && appEncryptionKey) {
-        const encoder = new TextEncoder();
-        const decoder = new TextDecoder();
-        const keyData = encoder.encode(appEncryptionKey);
-        const cryptoKey = await crypto.subtle.importKey("raw", keyData.slice(0, 32), { name: "AES-GCM" }, false, ["decrypt"]);
-        const encryptedBytes = Uint8Array.from(atob(userSecret.encrypted_value), c => c.charCodeAt(0));
-        const decryptedData = await crypto.subtle.decrypt({ name: "AES-GCM", iv: encryptedBytes.slice(0, 12) }, cryptoKey, encryptedBytes.slice(12));
-        geminiApiKey = decoder.decode(decryptedData);
-        isUserProvidedKey = true;
+        try {
+          const encoder = new TextEncoder();
+          const decoder = new TextDecoder();
+          const keyData = encoder.encode(appEncryptionKey);
+          const cryptoKey = await crypto.subtle.importKey("raw", keyData.slice(0, 32), { name: "AES-GCM" }, false, ["decrypt"]);
+          const encryptedBytes = Uint8Array.from(atob(userSecret.encrypted_value), c => c.charCodeAt(0));
+          const decryptedData = await crypto.subtle.decrypt({ name: "AES-GCM", iv: encryptedBytes.slice(0, 12) }, cryptoKey, encryptedBytes.slice(12));
+          const userKey = decoder.decode(decryptedData);
+          keyQueue.push({ key: userKey, keyId: null, isUserProvided: true });
+        } catch (e) {
+          console.warn('[evaluate-speaking] Failed to decrypt user API key:', e);
+        }
       }
     }
-    
-    if (!isUserProvidedKey) {
-      const dbApiKeys = await getActiveGeminiKeys(serviceClient);
-      if (dbApiKeys.length > 0) geminiApiKey = dbApiKeys[0].key_value;
+
+    // 2. Add admin keys from database
+    const dbApiKeys = await getActiveGeminiKeysForModel(serviceClient, 'flash');
+    for (const dbKey of dbApiKeys) {
+      keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
     }
-    
-    if (!geminiApiKey) {
+
+    if (keyQueue.length === 0) {
       return new Response(JSON.stringify({ error: 'No API key available. Please add your Gemini API key in Settings.', code: 'API_KEY_NOT_FOUND' }), {
         status: 403,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    // Credit check for system pool users
-    if (!isUserProvidedKey) {
-      const creditCheck = await checkCredits(serviceClient, user.id, 'evaluate_speaking');
-      if (!creditCheck.ok) {
-        return new Response(JSON.stringify({ error: creditCheck.error, code: 'CREDIT_LIMIT_EXCEEDED' }), {
-          status: 403,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+    console.log(`[evaluate-speaking] Key queue: ${keyQueue.length} keys (${keyQueue.filter(k => k.isUserProvided).length} user, ${keyQueue.filter(k => !k.isUserProvided).length} admin)`);
+
+    // ============ DOWNLOAD FILES FROM R2 ============
+    const tempFiles: { key: string; tempPath: string; mimeType: string }[] = [];
+    
+    try {
+      for (const [audioKey, r2Path] of Object.entries(filePaths as Record<string, string>)) {
+        const { tempPath, mimeType } = await downloadAudioFromR2(r2Path);
+        tempFiles.push({ key: audioKey, tempPath, mimeType });
       }
+      console.log(`[evaluate-speaking] Downloaded ${tempFiles.length} audio files to temp storage`);
+    } catch (downloadError) {
+      console.error('[evaluate-speaking] Failed to download audio files:', downloadError);
+      return new Response(JSON.stringify({ error: 'Failed to download audio files', code: 'R2_DOWNLOAD_ERROR' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    // 5. Construct Gemini API request parts with audio
-    // Each item in 'contents' array must have a 'parts' array.
-    const contents: Array<{ parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> }> = [];
-
-    // Initial instruction for Gemini
-    contents.push({
-      parts: [{
-        text: `You are an OFFICIAL IELTS Speaking examiner following the Cambridge/British Council 2025 assessment standards. Your task is to evaluate the candidate's speaking performance using the EXACT official IELTS Band Descriptors.
-
-      It is CRUCIAL that you:
-      1. Listen carefully to the actual audio recordings
-      2. Score STRICTLY according to official IELTS criteria - DO NOT inflate scores
-      3. If audio is silent or has no speech, score 0 for all criteria
-      
-      **When providing feedback, use markdown for emphasis.**
-
-      ---
-      **IELTS Speaking Test: ${test.name}**
-      ${test.description ? `Description: ${test.description}` : ''}
-      ---
-
-      === OFFICIAL IELTS BAND DESCRIPTORS (Apply Strictly) ===
-      
-      FLUENCY AND COHERENCE:
-      - Band 9: Speaks fluently with only very occasional repetition; develops topics fully and appropriately
-      - Band 7: Speaks at length without noticeable effort; uses a range of connectives with flexibility
-      - Band 5: Usually maintains flow but uses repetition/self-correction; over-uses certain connectives
-      - Band 3: Speaks with long pauses; limited ability to link sentences
-      - Band 0: No speech detected
-      
-      LEXICAL RESOURCE:
-      - Band 9: Uses vocabulary with full flexibility and precision; idiomatic language naturally
-      - Band 7: Uses vocabulary flexibly; some less common/idiomatic vocabulary with awareness of style
-      - Band 5: Manages familiar/unfamiliar topics but limited flexibility; mixed paraphrase success
-      - Band 3: Simple vocabulary for personal info; insufficient for unfamiliar topics
-      - Band 0: No speech detected
-      
-      GRAMMATICAL RANGE AND ACCURACY:
-      - Band 9: Full range of structures naturally; consistently accurate
-      - Band 7: Range of complex structures with flexibility; frequently error-free sentences
-      - Band 5: Basic sentence forms with reasonable accuracy; complex structures contain errors
-      - Band 3: Attempts basic forms with limited success; numerous errors
-      - Band 0: No speech detected
-      
-      PRONUNCIATION:
-      - Band 9: Full range of features with precision; effortless to understand
-      - Band 7: Wide range of features; easy to understand; minimal L1 interference
-      - Band 5: Mixed control of features; generally understood but mispronunciations occur
-      - Band 3: Limited features; frequent mispronunciations cause difficulty
-      - Band 0: No speech detected
-      
-      === SCORING RULES ===
-      - Score each criterion INDEPENDENTLY based on the evidence
-      - Most candidates score 5.0-7.0; Band 8+ requires exceptional performance
-      - Overall band = arithmetic mean of 4 criteria, rounded to nearest 0.5
-      - Minimal responses (1-3 words) = Max Band 3-4
-      - No speech = Band 0
-      `
-      }]
-    });
-
-    // Add parts and questions with their corresponding audio
-    questionGroups?.forEach(group => {
-      contents.push({ parts: [{ text: `\n**Part ${group.part_number}: ${group.part_number === 1 ? 'Introduction and Interview' : group.part_number === 2 ? 'Individual Long Turn (Cue Card)' : 'Two-way Discussion'}**\n` }] });
-      if (group.instruction) {
-        contents.push({ parts: [{ text: `Instructions: "${group.instruction}"\n` }] });
-      }
-
-      if (group.part_number === 2) {
-        if (group.cue_card_topic) contents.push({ parts: [{ text: `Cue Card Topic: "${group.cue_card_topic}"\n` }] });
-        if (group.cue_card_content) contents.push({ parts: [{ text: `Cue Card Content: "${group.cue_card_content}"\n` }] });
-        contents.push({ parts: [{ text: `Preparation Time: ${group.preparation_time_seconds} seconds, Speaking Time: ${group.speaking_time_seconds} seconds.\n` }] });
-        
-        // Part 2 has one logical question (the cue card itself)
-        const part2Question = group.speaking_questions?.[0];
-        if (part2Question) {
-          const audioKey = `part${group.part_number}-q${part2Question.id}`;
-          console.log(`Edge Function: Checking audio for ${audioKey}. Exists in receivedAudioKeys: ${receivedAudioKeys.includes(audioKey)}. Value type: ${typeof audioData[audioKey]}. Value length: ${audioData[audioKey]?.length}`); // NEW LOG
-           if (receivedAudioKeys.includes(audioKey) && audioData[audioKey]) {
-             const { mimeType, base64: audioBase64 } = parseDataUrl(audioData[audioKey]);
-             // Validate audio has actual content (not just empty recording)
-             if (audioBase64 && audioBase64.length > 1000) { // Minimum ~750 bytes of actual audio
-               contents.push({ parts: [{ text: `Your Audio Response for Part 2 (Topic: "${part2Question.question_text}"):\n` }] });
-               contents.push({ parts: [{ inlineData: { mimeType, data: audioBase64 } }] });
-               contents.push({ parts: [{ text: `Please provide a transcript for the above audio for Part 2, using the key "${audioKey}" in the "transcripts" object of the final JSON output. If the audio is silent or contains no speech, indicate "No speech detected" and give a band score of 0 for that part.` }] });
-             } else {
-              contents.push({ parts: [{ text: `You provided an empty or silent recording for Part 2. Score this as 0.\n` }] });
-            }
-          } else {
-            contents.push({ parts: [{ text: `You did not provide audio for Part 2. Score this as 0.\n` }] });
-          }
-        }
-      } else {
-        group.speaking_questions?.forEach(question => {
-          contents.push({ parts: [{ text: `\nQuestion ${question.question_number}: "${question.question_text}"\n` }] });
-          const audioKey = `part${group.part_number}-q${question.id}`;
-          console.log(`Edge Function: Checking audio for ${audioKey}. Exists in receivedAudioKeys: ${receivedAudioKeys.includes(audioKey)}. Value type: ${typeof audioData[audioKey]}. Value length: ${audioData[audioKey]?.length}`);
-           if (receivedAudioKeys.includes(audioKey) && audioData[audioKey]) {
-             const { mimeType, base64: audioBase64 } = parseDataUrl(audioData[audioKey]);
-             // Validate audio has actual content (not just empty recording)
-             if (audioBase64 && audioBase64.length > 1000) { // Minimum ~750 bytes of actual audio
-               contents.push({ parts: [{ text: `Your Audio Response for Question ${question.question_number}:\n` }] });
-               contents.push({ parts: [{ inlineData: { mimeType, data: audioBase64 } }] });
-               contents.push({ parts: [{ text: `Please provide a transcript for the above audio for Question ${question.question_number}, using the key "${audioKey}" in the "transcripts" object of the final JSON output. If the audio is silent or contains no speech, indicate "No speech detected" and give a band score of 0 for that question.` }] });
-             } else {
-              contents.push({ parts: [{ text: `You provided an empty or silent recording for Question ${question.question_number}. Score this as 0.\n` }] });
-            }
-          } else {
-            contents.push({ parts: [{ text: `You did not provide audio for Question ${question.question_number}. Score this as 0.\n` }] });
-          }
-        });
-      }
-    });
-
-    contents.push({
-      parts: [{
-        text: `\n---
-      **Evaluation Criteria:**
-
-      1.  **Fluency and Coherence**:
-          -   **Band**: [0-9, in 0.5 increments]
-          -   **Strengths**: What you did well in speaking smoothly, logically, and connecting ideas.
-          -   **Weaknesses**: Areas where your pauses, repetition, or unclear connections could be improved.
-          -   **Suggestions for Improvement**: Actionable advice to enhance your fluency and coherence.
-      2.  **Lexical Resource**:
-          -   **Band**: [0-9, in 0.5 increments]
-          -   **Strengths**: What you did well in using a range of vocabulary accurately and appropriately.
-          -   **Weaknesses**: Areas where your vocabulary could be more varied, precise, or natural.
-          -   **Suggestions for Improvement**: Advice on expanding your vocabulary and using less common lexical items effectively.
-      3.  **Grammatical Range and Accuracy**:
-          -   **Band**: [0-9, in 0.5 increments]
-          -   **Strengths**: What you did well in using a variety of grammatical structures accurately.
-          -   **Weaknesses**: Common errors or areas where your grammatical control could be improved.
-          -   **Suggestions for Improvement**: Advice to enhance your grammatical range and accuracy.
-      4.  **Pronunciation**:
-          -   **Band**: [0-9, in 0.5 increments]
-          -   **Strengths**: What you did well in producing clear, understandable speech with appropriate intonation and stress.
-          -   **Weaknesses**: Areas where your pronunciation, intonation, or stress patterns could be improved for clarity.
-          -   **Suggestions for Improvement**: Advice to improve your pronunciation for better intelligibility.
-
-      **Part-by-Part Analysis:**
-      Provide a brief summary of performance for each part, highlighting specific strengths and weaknesses observed in that part.
-
-      -   **Part 1: Introduction & Interview**
-          -   **Summary**: Overall impression of Part 1.
-          -   **Strengths**: Specific examples of good performance.
-          -   **Weaknesses**: Specific areas for improvement.
-      -   **Part 2: Individual Long Turn**
-          -   **Topic Coverage**: How well the topic was addressed.
-          -   **Organization Quality**: Structure and flow of the long turn.
-          -   **Cue Card Fulfillment**: How well all parts of the cue card were covered.
-      -   **Part 3: Two-way Discussion**
-          -   **Depth of Discussion**: Ability to discuss abstract ideas and elaborate.
-          -   **Question Notes**: Any specific observations on handling Part 3 questions.
-
-      **Overall Recommendations:**
-      -   **Improvement Recommendations**: A list of general actionable advice and strategies you can use to improve overall speaking.
-      -   **Strengths to Maintain**: A list of key strengths you should continue to leverage.
-      -   **Examiner Notes (Optional)**: Any additional general comments.
-
-      Format your response as a JSON object with the following structure:
-      {
-        "overall_band": number,
-        "evaluation_report": {
-          "fluency_coherence": {
-            "band": number,
-            "strengths": string,
-            "weaknesses": string,
-            "suggestions_for_improvement": string
-          },
-          "lexical_resource": {
-            "band": number,
-            "strengths": string,
-            "weaknesses": string,
-            "suggestions_for_improvement": string
-          },
-          "grammatical_range_accuracy": {
-            "band": number,
-            "strengths": string,
-            "weaknesses": string,
-            "suggestions_for_improvement": string
-          },
-          "pronunciation": {
-            "band": number,
-            "strengths": string,
-            "weaknesses": string,
-            "suggestions_for_improvement": string
-          },
-          "part_by_part_analysis": {
-            "part1": {
-              "summary": string,
-              "strengths": string,
-              "weaknesses": string
-            },
-            "part2": {
-              "topic_coverage": string,
-              "organization_quality": string,
-              "cue_card_fulfillment": string
-            },
-            "part3": {
-              "depth_of_discussion": string,
-              "question_notes": string
-            }
-          },
-          "improvement_recommendations": string[],
-          "strengths_to_maintain": string[],
-          "examiner_notes": string,
-          "modelAnswers": [
-            {"partNumber": number, "question": string, "candidateResponse": string, "modelAnswerBand6": string, "modelAnswerBand7": string, "modelAnswerBand8": string, "modelAnswerBand9": string, "whyBand6Works": string[], "whyBand7Works": string[], "whyBand8Works": string[], "whyBand9Works": string[]}
-          ],
-          "transcripts": {
-            "part1-q[question_id_1]": "Transcript for Part 1 Question 1",
-            "part1-q[question_id_2]": "Transcript for Part 1 Question 2",
-            "part2-q[part2_question_id]": "Transcript for Part 2 long turn",
-            "part3-q[question_id_1]": "Transcript for Part 3 Question 1"
-          }
-        }
-      }
-      
-      CRITICAL MANDATORY REQUIREMENTS FOR MODEL ANSWERS:
-      1. The "modelAnswers" array MUST contain an entry for EVERY question from ALL parts - NO EXCEPTIONS.
-      2. Each entry MUST include ALL FOUR band levels: modelAnswerBand6, modelAnswerBand7, modelAnswerBand8, modelAnswerBand9.
-      3. Each entry MUST include ALL FOUR whyBandXWorks arrays: whyBand6Works, whyBand7Works, whyBand8Works, whyBand9Works.
-      4. NEVER skip or omit any band level - all four are MANDATORY for every question.
-      5. If any band level is missing, the response will be REJECTED and must be regenerated.
-      6. Each whyBandXWorks array should have 2-4 specific reasons.
-      
-      MANDATORY WORD COUNT REQUIREMENTS FOR MODEL ANSWERS (STRICT - REGARDLESS OF CANDIDATE RESPONSE LENGTH):
-      - Part 1 model answers: 60-85 words per question (natural, conversational with examples)
-      - Part 2 model answers: 260-340 words (comprehensive long turn with all cue card points covered)
-      - Part 3 model answers: 130-170 words per question (in-depth discussion with reasoning and examples)
-      These word counts are MINIMUM STANDARDS. Even if the candidate gave a very short response, YOUR model answers MUST meet these lengths.
-      Model answers should demonstrate ideal response structure and vocabulary for each band level.
-      
-      Ensure your response is ONLY the JSON object, with no additional text or markdown formatting outside of the JSON itself.
-      `
-      }]
-    });
-
-    console.log('Edge Function: Gemini contents array:', JSON.stringify(contents, null, 2)); // Log 4
-
-    // 6. Call Gemini API for evaluation with fallback models
+    // ============ ATOMIC SESSION EXECUTION LOOP ============
     let responseText: string | null = null;
     let usedModel: string | null = null;
+    let usedKey: KeyCandidate | null = null;
 
-    for (const modelName of GEMINI_MODELS_FALLBACK_ORDER) {
-      console.log(`Attempting evaluation with Gemini model: ${modelName}`);
-      const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`;
+    for (const candidateKey of keyQueue) {
+      console.log(`[evaluate-speaking] Trying key ${candidateKey.isUserProvided ? '(user)' : `(admin: ${candidateKey.keyId})`}`);
+
+      // Credit check for admin keys only
+      if (!candidateKey.isUserProvided) {
+        const creditCheck = await checkCredits(serviceClient, user.id, 'evaluate_speaking');
+        if (!creditCheck.ok) {
+          console.log(`[evaluate-speaking] Credit check failed for admin key, skipping...`);
+          continue;
+        }
+      }
 
       try {
-        const geminiResponse = await fetch(GEMINI_API_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: contents, // Send the constructed contents array
-          }),
-        });
+        // STEP 1: Upload files to Google File API (ATOMIC with this key)
+        const fileManager = new GoogleAIFileManager(candidateKey.key);
+        const fileUris: { uri: string; mimeType: string; key: string }[] = [];
 
-        if (geminiResponse.ok) {
-          const geminiData = await geminiResponse.json();
-          const content = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (content) {
-            responseText = content;
-            usedModel = modelName;
-            break; // Exit loop on successful response with content
-          } else {
-            console.warn(`Model ${modelName} returned OK but no content. Trying next model.`);
-          }
-        } else {
-          const errorText = await geminiResponse.text();
-          console.error(`Gemini API error with model ${modelName} (Status: ${geminiResponse.status}): ${errorText}`);
-
-          // Specific error handling for Gemini API issues
-          if (geminiResponse.status === 401 || geminiResponse.status === 403) {
-            throw new Error(JSON.stringify({ error: `Your Gemini API key is invalid or suspended. Please check your key in settings.`, code: 'API_KEY_INVALID_OR_SUSPENDED' }));
-          } else if (geminiResponse.status === 429) {
-            throw new Error(JSON.stringify({ error: `Your Gemini API quota has been exceeded. Please wait or check your usage limits.`, code: 'GEMINI_QUOTA_EXCEEDED' }));
-          }
-          
-          const isRecoverableError = 
-            (geminiResponse.status >= 500 && geminiResponse.status < 600) || 
-            errorText.includes('rate limit') || 
-            errorText.includes('overloaded') || 
-            errorText.includes('model not found') || 
-            errorText.includes('invalid model');
-
-          if (isRecoverableError) {
-            console.log(`Recoverable error with model ${modelName}. Trying next model.`);
-            continue;
-          } else {
-            throw new Error(JSON.stringify({ error: `Gemini API error: ${geminiResponse.status} - ${errorText}`, code: 'GEMINI_SERVICE_ERROR' }));
+        for (const tempFile of tempFiles) {
+          try {
+            const uploadResult = await fileManager.uploadFile(tempFile.tempPath, {
+              mimeType: tempFile.mimeType,
+              displayName: tempFile.key,
+            });
+            fileUris.push({ uri: uploadResult.file.uri, mimeType: tempFile.mimeType, key: tempFile.key });
+            console.log(`[evaluate-speaking] Uploaded ${tempFile.key} to Google: ${uploadResult.file.uri}`);
+          } catch (uploadError: any) {
+            if (isQuotaExhaustedError(uploadError) || uploadError?.status === 429 || uploadError?.status === 403) {
+              throw new QuotaError(`Upload quota exhausted: ${uploadError.message}`);
+            }
+            throw uploadError;
           }
         }
-      } catch (fetchError: any) {
-        console.error(`Fetch error with model ${modelName}:`, fetchError.message);
-        continue;
+
+        // STEP 2: Generate content with the same key (ATOMIC)
+        const genAI = new GoogleGenerativeAI(candidateKey.key);
+        
+        // Try each model in priority order
+        for (const modelName of GEMINI_MODELS) {
+          try {
+            console.log(`[evaluate-speaking] Attempting evaluation with model: ${modelName}`);
+            const model = genAI.getGenerativeModel({ model: modelName });
+            
+            const contents = buildEvaluationPrompt(test, questionGroups || [], fileUris);
+            
+            const result = await model.generateContent({
+              contents,
+            });
+
+            const content = result.response?.text();
+            if (content) {
+              responseText = content;
+              usedModel = modelName;
+              usedKey = candidateKey;
+              break; // Success with this model
+            }
+          } catch (modelError: any) {
+            console.warn(`[evaluate-speaking] Model ${modelName} failed:`, modelError.message);
+            
+            if (isQuotaExhaustedError(modelError) || modelError?.status === 429 || modelError?.status === 403) {
+              throw new QuotaError(`Generation quota exhausted: ${modelError.message}`);
+            }
+            
+            // Continue to next model
+            continue;
+          }
+        }
+
+        if (responseText) break; // Success, exit key loop
+
+      } catch (error: any) {
+        if (error instanceof QuotaError) {
+          console.warn(`[evaluate-speaking] Key ${candidateKey.keyId || 'user'} quota exhausted. Switching to next key...`);
+          
+          if (!candidateKey.isUserProvided && candidateKey.keyId) {
+            await markKeyQuotaExhausted(serviceClient, candidateKey.keyId, 'flash');
+          }
+          
+          continue; // Try next key
+        }
+        
+        // Fatal error - throw
+        console.error('[evaluate-speaking] Fatal error during evaluation:', error);
+        throw error;
       }
     }
 
-    if (!responseText || !usedModel) {
-      throw new Error(JSON.stringify({ error: 'All Gemini models failed to provide a valid response after multiple attempts.', code: 'GEMINI_SERVICE_ERROR' }));
+    // Cleanup temp files
+    for (const tempFile of tempFiles) {
+      try {
+        await Deno.remove(tempFile.tempPath);
+      } catch {
+        // Ignore cleanup errors
+      }
     }
 
-    console.log(`Successfully received response from model: ${usedModel}`);
+    if (!responseText || !usedModel || !usedKey) {
+      throw new Error(JSON.stringify({ error: 'All API keys exhausted. Please try again later or add your own Gemini API key.', code: 'ALL_KEYS_EXHAUSTED' }));
+    }
 
+    console.log(`[evaluate-speaking] Successfully received response from model: ${usedModel}`);
+
+    // Deduct credits for admin keys on success
+    if (!usedKey.isUserProvided) {
+      await deductCredits(serviceClient, user.id, 'evaluate_speaking');
+    }
+
+    // Parse response
     let evaluationReport: any;
     let overallBand: number | null = null;
 
     try {
       responseText = responseText.replace(/```json\n|\n```/g, '').trim();
-      console.log('Cleaned Gemini response:', responseText);
+      console.log('[evaluate-speaking] Cleaned Gemini response length:', responseText.length);
 
       const parsedResponse = JSON.parse(responseText);
       overallBand = parsedResponse.overall_band;
+      
       // Normalize model answers in the evaluation report
       const rawReport = parsedResponse.evaluation_report || {};
       if (rawReport.modelAnswers && Array.isArray(rawReport.modelAnswers)) {
@@ -642,13 +697,12 @@ serve(async (req) => {
       }
     }
 
-    // 7. Update submission with evaluation results (transcripts remain null)
+    // Update submission with evaluation results
     const { error: updateError } = await supabaseClient
       .from('speaking_submissions')
       .update({
         evaluation_report: evaluationReport,
         overall_band: overallBand,
-        // transcript_partX fields remain null as Gemini provides evaluation, not ASR transcript
       })
       .eq('id', submissionId);
 
@@ -703,7 +757,6 @@ serve(async (req) => {
       errorMessage = parsedError.error || errorMessage;
       errorCode = parsedError.code || errorCode;
     } catch (e) {
-      // Not a JSON error, use original message
       errorMessage = error.message;
     }
 

@@ -24,7 +24,7 @@ import { Badge } from '@/components/ui/badge';
 import { MicrophoneTest } from '@/components/speaking/MicrophoneTest';
 import { AILoadingScreen } from '@/components/common/AILoadingScreen';
 import { useFullscreenTest } from '@/hooks/useFullscreenTest';
-import { compressAudio } from '@/utils/audioCompressor';
+import { uploadToR2 } from '@/lib/r2Upload';
 
 type SpeakingTest = Tables<'speaking_tests'>;
 
@@ -409,7 +409,16 @@ export default function SpeakingTest() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      
+      // Use native WebM/Opus recording - tiny files, zero CPU overhead, no compression needed
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+        ? 'audio/webm;codecs=opus' 
+        : 'audio/webm';
+      
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        audioBitsPerSecond: 32000, // 32kbps - high quality, small files
+      });
 
       audioChunks.current = [];
       recorder.ondataavailable = (event) => {
@@ -698,7 +707,7 @@ export default function SpeakingTest() {
     // Show AI Loading Screen
     setShowAILoadingScreen(true);
     setAiProgressSteps([
-      'Preparing your audio for AI',
+      'Uploading your audio recordings',
       'Analyzing your speaking performance',
       'Generating detailed feedback report',
       'Calculating your overall band score',
@@ -713,7 +722,7 @@ export default function SpeakingTest() {
     };
 
     try {
-      await simulateProgress(0, 500); // Step 0: Preparing audio
+      await simulateProgress(0, 500); // Step 0: Uploading audio
 
       const submissionTimestamp = new Date().toISOString();
       
@@ -739,30 +748,40 @@ export default function SpeakingTest() {
 
       if (insertError) throw insertError;
 
-      // Convert all recorded audio blobs to Base64 for sending to Edge Function
-      // Prefer MP3 to reduce payload size (same compression approach as AI Practice)
-      const base64AudioData: Record<string, string> = {};
+      // UPLOAD-FIRST APPROACH: Upload all audio files to R2 first, then send paths to Edge Function
+      const filePaths: Record<string, string> = {};
+      const uploadPromises: Promise<void>[] = [];
+      
       for (const key in audioBlobs.current) {
         const blob = audioBlobs.current[key];
-
-        try {
-          const inputFile = new File([blob], `${key}.webm`, { type: blob.type || 'audio/webm' });
-          const mp3File = await compressAudio(inputFile);
-          base64AudioData[key] = await blobToBase64(mp3File);
-        } catch (e) {
-          console.warn('[SpeakingTest] MP3 compression failed, falling back to original blob:', e);
-          base64AudioData[key] = await blobToBase64(blob);
-        }
+        const fileName = `${key}.webm`;
+        
+        uploadPromises.push(
+          uploadToR2({
+            file: blob,
+            folder: `speaking/${user.id}/${newSubmission.id}`,
+            fileName,
+          }).then((result) => {
+            if (result.success && result.key) {
+              filePaths[key] = result.key;
+              console.log(`[SpeakingTest] Uploaded ${key} to R2: ${result.key}`);
+            } else {
+              console.error(`[SpeakingTest] Failed to upload ${key}:`, result.error);
+              throw new Error(`Failed to upload audio: ${result.error}`);
+            }
+          })
+        );
       }
 
-      console.log('Audio Blobs before Base64 conversion:', audioBlobs.current); // Log 1
-      console.log('Base64 Audio Data being sent:', base64AudioData); // Log 2
+      // Wait for all uploads to complete
+      await Promise.all(uploadPromises);
+      console.log('[SpeakingTest] All audio files uploaded. File paths:', filePaths);
 
       await simulateProgress(1); // Step 1: Analyzing with AI
 
-      // Trigger AI evaluation, sending audio data directly
+      // Trigger AI evaluation, sending file paths instead of audio data
       const { error: evaluationError } = await supabase.functions.invoke('evaluate-speaking-submission', {
-        body: { submissionId: newSubmission.id, audioData: base64AudioData },
+        body: { submissionId: newSubmission.id, filePaths },
       });
 
       if (evaluationError) {
@@ -786,7 +805,7 @@ export default function SpeakingTest() {
       await simulateProgress(3); // Step 3: Calculating band score
 
       clearGuestDraft(); // Clear guest draft after successful submission
-      toast.success('Speaking test submitted! Evaluation will be available shortly.', { id: 'ai-eval-toast', duration: 5000 }); // Added duration
+      toast.success('Speaking test submitted! Evaluation will be available shortly.', { id: 'ai-eval-toast', duration: 5000 });
 
       if (!exitRequestedRef.current && isMountedRef.current) {
         // Exit fullscreen before navigating to results
