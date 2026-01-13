@@ -40,7 +40,10 @@ interface PendingEvaluation {
   updated_at?: string;
   last_error?: string | null;
   retry_count?: number;
+  max_retries?: number;
 }
+
+const MAX_RETRIES = 5; // Must match edge function
 
 type AIPracticeTest = Tables<'ai_practice_tests'>;
 type AIPracticeResult = Tables<'ai_practice_results'>;
@@ -554,10 +557,16 @@ export default function AIPracticeHistory() {
                                 Retrying...
                               </Badge>
                             )}
-                            {isPendingEval && pendingJob && ['failed', 'stale'].includes(pendingJob.status) && (
+                            {isPendingEval && pendingJob?.status === 'stale' && (
+                              <Badge variant="outline" className="gap-1 text-xs border-warning/50 text-warning">
+                                <AlertCircle className="w-3 h-3" />
+                                Timed Out (Retry {pendingJob.retry_count || 0}/{MAX_RETRIES})
+                              </Badge>
+                            )}
+                            {isPendingEval && pendingJob?.status === 'failed' && (
                               <Badge variant="outline" className="gap-1 text-xs border-destructive/50 text-destructive">
                                 <AlertCircle className="w-3 h-3" />
-                                {pendingJob.status === 'stale' ? 'Timed Out' : 'Evaluation Failed'}
+                                Evaluation Failed
                               </Badge>
                             )}
                             {!hasResult && !hasFailedSub && !isPendingEval && (
@@ -607,8 +616,8 @@ export default function AIPracticeHistory() {
                               <Eye className="w-4 h-4" />
                             </Button>
                           )}
-                          {/* Retry button for failed/stale speaking evaluations */}
-                          {isPendingEval && pendingJob && ['failed', 'stale'].includes(pendingJob.status) && (
+                          {/* Retry button for stale evaluations (not yet at max retries) */}
+                          {isPendingEval && pendingJob?.status === 'stale' && (pendingJob.retry_count || 0) < MAX_RETRIES && (
                             <Button
                               variant="outline"
                               size="sm"
@@ -621,8 +630,14 @@ export default function AIPracticeHistory() {
                               ) : (
                                 <RefreshCw className="w-4 h-4" />
                               )}
-                              <span className="hidden sm:inline">Retry</span>
+                              <span className="hidden sm:inline">Retry ({(pendingJob.retry_count || 0) + 1}/{MAX_RETRIES})</span>
                             </Button>
+                          )}
+                          {/* Show failed message - no retry option */}
+                          {isPendingEval && pendingJob?.status === 'failed' && (
+                            <span className="text-xs text-destructive hidden sm:inline">
+                              Max retries reached
+                            </span>
                           )}
                           <Button
                             variant="ghost"
