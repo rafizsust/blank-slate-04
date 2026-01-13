@@ -26,6 +26,11 @@ const corsHeaders = {
 const STALE_THRESHOLD_SECONDS = 90; // Edge functions timeout at ~60s
 const MAX_RETRIES = 5;
 
+// Helper to check if job has exhausted all retries
+const hasExhaustedRetries = (job: any): boolean => {
+  return (job.retry_count || 0) >= MAX_RETRIES;
+};
+
 serve(async (req) => {
   console.log(`[retry-speaking-evaluation] Request at ${new Date().toISOString()}`);
   
@@ -58,10 +63,10 @@ serve(async (req) => {
       .select('*');
 
     if (specificJobId) {
-      // Manual retry of specific job
+      // Manual retry of specific job - check if it hasn't exhausted retries
       query = query.eq('id', specificJobId);
     } else {
-      // Cron job: find stale/stuck jobs
+      // Cron job: find stale/stuck jobs that haven't exhausted retries
       query = query
         .or(`status.eq.processing,status.eq.pending,status.eq.stale`)
         .lt('updated_at', staleThreshold)
@@ -98,14 +103,31 @@ serve(async (req) => {
 
     for (const job of stuckJobs) {
       try {
+        const currentRetryCount = job.retry_count || 0;
+        
+        // Check if already at max retries - mark as permanently failed
+        if (hasExhaustedRetries(job)) {
+          console.log(`[retry-speaking-evaluation] Job ${job.id} has exhausted all ${MAX_RETRIES} retries, marking as failed`);
+          await supabaseService
+            .from('speaking_evaluation_jobs')
+            .update({
+              status: 'failed',
+              last_error: `Evaluation failed after ${MAX_RETRIES} attempts. Please try generating a new test or contact support.`,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', job.id);
+          results.push({ jobId: job.id, status: 'failed', message: `Max retries (${MAX_RETRIES}) exhausted` });
+          continue;
+        }
+
         // Mark job as "retrying" to prevent duplicate retries
         const { error: updateError } = await supabaseService
           .from('speaking_evaluation_jobs')
           .update({
             status: 'retrying',
-            retry_count: (job.retry_count || 0) + 1,
+            retry_count: currentRetryCount + 1,
             last_error: job.status === 'processing' 
-              ? 'Previous attempt timed out (edge function shutdown)' 
+              ? `Attempt ${currentRetryCount + 1}/${MAX_RETRIES}: Previous attempt timed out` 
               : job.last_error,
             updated_at: new Date().toISOString(),
           })
@@ -117,6 +139,8 @@ serve(async (req) => {
           results.push({ jobId: job.id, status: 'skipped', message: 'Failed to acquire lock' });
           continue;
         }
+        
+        console.log(`[retry-speaking-evaluation] Retry attempt ${currentRetryCount + 1}/${MAX_RETRIES} for job ${job.id}`);
 
         // Trigger new evaluation by calling evaluate-speaking-async
         const evalResponse = await fetch(`${supabaseUrl}/functions/v1/evaluate-speaking-async`, {
