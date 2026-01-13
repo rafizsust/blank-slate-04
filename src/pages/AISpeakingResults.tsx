@@ -124,16 +124,35 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
 
   const asArray = <T,>(v: any): T[] => (Array.isArray(v) ? v : []);
 
-  const normalizeCriterion = (v: any): CriterionScore => {
-    const feedback = typeof v?.feedback === 'string' ? v.feedback : undefined;
-    const examples = asArray<string>(v?.examples);
+  // Accept multiple shapes:
+  // - New UI-friendly: { fluency_coherence: { score, feedback, ... } }
+  // - Gemini async current: { criteria: { fluency_coherence: { band, feedback } ... }, overall_band }
+  const fromCriteria = (key: string) => {
+    const c = raw?.criteria?.[key];
+    if (!c) return null;
+    return {
+      score: toNumber(c?.band ?? c?.score, 0),
+      feedback: typeof c?.feedback === 'string' ? c.feedback : undefined,
+      examples: [],
+      strengths: [],
+      weaknesses: [],
+      suggestions: [],
+    } as Partial<CriterionScore>;
+  };
 
-    const strengths = asArray<string>(v?.strengths);
-    const weaknesses = asArray<string>(v?.weaknesses ?? v?.errors);
-    const suggestions = asArray<string>(v?.suggestions ?? v?.notes);
+  const normalizeCriterion = (v: any, criteriaKey?: string): CriterionScore => {
+    const fromC = criteriaKey ? fromCriteria(criteriaKey) : null;
+    const merged = fromC ? { ...v, ...fromC } : v;
+
+    const feedback = typeof merged?.feedback === 'string' ? merged.feedback : undefined;
+    const examples = asArray<string>(merged?.examples);
+
+    const strengths = asArray<string>(merged?.strengths);
+    const weaknesses = asArray<string>(merged?.weaknesses ?? merged?.errors);
+    const suggestions = asArray<string>(merged?.suggestions ?? merged?.notes);
 
     return {
-      score: toNumber(v?.score, 0),
+      score: toNumber(merged?.score ?? merged?.band, 0),
       feedback,
       examples,
       strengths: strengths.length ? strengths : examples,
@@ -178,18 +197,19 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
 
   return {
     overall_band: overallBand,
-    fluency_coherence: normalizeCriterion(raw?.fluency_coherence ?? raw?.fluencyCoherence),
-    lexical_resource: normalizeCriterion(raw?.lexical_resource ?? raw?.lexicalResource),
-    grammatical_range: normalizeCriterion(raw?.grammatical_range ?? raw?.grammaticalRange),
-    pronunciation: normalizeCriterion(raw?.pronunciation),
+    fluency_coherence: normalizeCriterion(raw?.fluency_coherence ?? raw?.fluencyCoherence, 'fluency_coherence'),
+    lexical_resource: normalizeCriterion(raw?.lexical_resource ?? raw?.lexicalResource, 'lexical_resource'),
+    grammatical_range: normalizeCriterion(raw?.grammatical_range ?? raw?.grammaticalRange, 'grammatical_range'),
+    pronunciation: normalizeCriterion(raw?.pronunciation, 'pronunciation'),
     lexical_upgrades: lexicalUpgrades,
     part_analysis: partAnalysis,
-    improvement_priorities: asArray<string>(raw?.improvement_priorities ?? raw?.priorityImprovements),
+    improvement_priorities: asArray<string>(raw?.improvement_priorities ?? raw?.priorityImprovements ?? raw?.improvements),
     strengths_to_maintain: asArray<string>(raw?.strengths_to_maintain ?? raw?.keyStrengths),
     examiner_notes: String(raw?.examiner_notes ?? raw?.summary ?? ''),
     modelAnswers,
   };
 }
+
 
 function normalizeSpeakingAnswers(raw: any): {
   audioUrls: Record<string, string>;
@@ -288,28 +308,48 @@ export default function AISpeakingResults() {
 
     if (error) {
       console.error('Failed to load speaking results:', error);
-      // Don't navigate away - let the realtime handle it
       return;
     }
 
-    if (data) {
-      const report = normalizeEvaluationReport(data.question_results);
-      const { audioUrls, transcriptsByPart, transcriptsByQuestion } = normalizeSpeakingAnswers(data.answers);
+    if (!data) return;
 
-      setResult({
-        id: data.id,
-        test_id: data.test_id,
-        overall_band: data.band_score || report.overall_band || 0,
-        evaluation_report: report,
-        audio_urls: audioUrls,
-        candidate_transcripts: {
-          by_part: transcriptsByPart,
-          by_question: transcriptsByQuestion,
-        },
-        created_at: data.completed_at,
-      });
-      setLoading(false);
+    const report = normalizeEvaluationReport(data.question_results);
+
+    // answers can be either:
+    // 1) { audio_urls, transcripts_by_part, ... } (new)
+    // 2) { [segmentKey]: r2Key } (legacy from early async save)
+    let { audioUrls, transcriptsByPart, transcriptsByQuestion } = normalizeSpeakingAnswers(data.answers);
+
+    if (Object.keys(audioUrls).length === 0 && data.answers && typeof data.answers === 'object') {
+      const legacyMap = data.answers as any;
+      const hasOnlyStrings = Object.values(legacyMap).every((v) => typeof v === 'string');
+      if (hasOnlyStrings) {
+        try {
+          const { data: resolved, error: resolveErr } = await supabase.functions.invoke('resolve-r2-public-urls', {
+            body: { filePaths: legacyMap },
+          });
+          if (!resolveErr && resolved?.audioUrls && typeof resolved.audioUrls === 'object') {
+            audioUrls = resolved.audioUrls as Record<string, string>;
+          }
+        } catch (e) {
+          console.warn('[AISpeakingResults] Failed to resolve legacy audio URLs:', e);
+        }
+      }
     }
+
+    setResult({
+      id: data.id,
+      test_id: data.test_id,
+      overall_band: data.band_score || report.overall_band || 0,
+      evaluation_report: report,
+      audio_urls: audioUrls,
+      candidate_transcripts: {
+        by_part: transcriptsByPart,
+        by_question: transcriptsByQuestion,
+      },
+      created_at: data.completed_at,
+    });
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -328,6 +368,7 @@ export default function AISpeakingResults() {
 
     loadResults();
   }, [testId, navigate, user, authLoading]);
+
 
   const togglePart = (partNum: number) => {
     setExpandedParts(prev => {

@@ -40,10 +40,22 @@ export function useSpeakingEvaluationRealtime({
   const pollTimerRef = useRef<number | null>(null);
   const hasCompletedRef = useRef(false);
 
+  // Keep callbacks stable so realtime subscription doesn't resubscribe every render
+  const onCompleteRef = useRef(onComplete);
+  const onFailedRef = useRef(onFailed);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+
+  useEffect(() => {
+    onFailedRef.current = onFailed;
+  }, [onFailed]);
+
   const handleJobUpdate = useCallback((job: EvaluationJob) => {
     console.log('[SpeakingEvaluationRealtime] Job update:', job.status, job.id);
-    
-    setJobStatus(job.status);
+
+    setJobStatus(job.status as EvaluationJob['status']);
     setRetryCount(job.retry_count || 0);
     setLastError(job.last_error);
 
@@ -53,9 +65,9 @@ export function useSpeakingEvaluationRealtime({
         title: 'Evaluation Complete!',
         description: 'Your speaking test results are ready.',
       });
-      
-      onComplete?.(job.result_id);
-      
+
+      onCompleteRef.current?.(job.result_id);
+
       if (autoNavigate) {
         navigate(`/ai-practice/speaking/results/${testId}`);
       }
@@ -66,10 +78,10 @@ export function useSpeakingEvaluationRealtime({
         description: errorMessage,
         variant: 'destructive',
       });
-      
-      onFailed?.(errorMessage);
+
+      onFailedRef.current?.(errorMessage);
     }
-  }, [testId, onComplete, onFailed, autoNavigate, navigate, toast]);
+  }, [testId, autoNavigate, navigate, toast]);
 
   // Realtime subscription
   useEffect(() => {
@@ -82,13 +94,13 @@ export function useSpeakingEvaluationRealtime({
       .on(
         'postgres_changes',
         {
-          event: '*', // Listen to INSERT and UPDATE
+          event: '*',
           schema: 'public',
           table: 'speaking_evaluation_jobs',
           filter: `test_id=eq.${testId}`,
         },
         (payload: any) => {
-          if (payload.new) {
+          if (payload?.new) {
             handleJobUpdate(payload.new as EvaluationJob);
           }
         }
@@ -124,7 +136,7 @@ export function useSpeakingEvaluationRealtime({
       if (jobs && jobs.length > 0) {
         const job = jobs[0] as unknown as EvaluationJob;
         handleJobUpdate(job);
-        
+
         // Continue polling if not in terminal state
         if (job.status !== 'completed' && job.status !== 'failed') {
           pollTimerRef.current = window.setTimeout(pollJobStatus, pollInterval);
@@ -140,7 +152,7 @@ export function useSpeakingEvaluationRealtime({
   // Initial check and start polling
   useEffect(() => {
     if (!testId) return;
-    
+
     hasCompletedRef.current = false;
     pollJobStatus();
 
@@ -163,3 +175,4 @@ export function useSpeakingEvaluationRealtime({
     isWaiting: jobStatus === 'pending' || jobStatus === 'processing',
   };
 }
+

@@ -861,81 +861,13 @@ export default function AIPracticeSpeakingTest() {
     presetAudioTimersRef.current.endingSafety = safetyTimeout;
   };
 
-  // Function to send a part for background evaluation
-  const evaluatePartInBackground = useCallback(async (partNum: 1 | 2 | 3) => {
-    const segments = audioSegmentsRef.current;
-    const parts = speakingPartsRef.current;
-    const part = parts[`part${partNum}` as keyof typeof parts];
-    
-    if (!part || !testId) return;
+  // Legacy per-part evaluation (deprecated).
+  // The async speaking flow should make ONE call (evaluate-speaking-async) after upload.
+  // Keeping this as a no-op prevents accidental extra Gemini calls + 500 spam.
+  const evaluatePartInBackground = useCallback(async (_partNum: 1 | 2 | 3) => {
+    return;
+  }, []);
 
-    // Get audio segments for this part
-    const partAudioData: Record<string, string> = {};
-    const partDurations: Record<string, number> = {};
-    const partKeys = Object.keys(segments).filter(k => k.startsWith(`part${partNum}-`));
-    
-    if (partKeys.length === 0) {
-      console.log(`[AIPracticeSpeakingTest] No audio segments for Part ${partNum}, skipping background evaluation`);
-      return;
-    }
-
-    setEvaluatingParts(prev => new Set([...prev, partNum]));
-    console.log(`[AIPracticeSpeakingTest] Starting background evaluation for Part ${partNum}`);
-
-    try {
-        for (const key of partKeys) {
-          const seg = segments[key];
-          const inferredType = seg.chunks?.[0]?.type || 'audio/webm';
-          const blob = new Blob(seg.chunks, { type: inferredType });
-          partDurations[key] = seg.duration;
-
-          // Don't drop short answers: Gemini can still transcribe very small clips.
-          // Only skip truly empty blobs.
-          if (blob.size === 0) continue;
-
-          const dataUrl = await toMp3DataUrl(blob, key);
-          partAudioData[key] = dataUrl;
-        }
-
-      if (Object.keys(partAudioData).length === 0) {
-        console.log(`[AIPracticeSpeakingTest] No valid audio for Part ${partNum}`);
-        return;
-      }
-
-      const { data, error } = await supabase.functions.invoke('evaluate-ai-speaking-part', {
-        body: {
-          testId,
-          partNumber: partNum,
-          audioData: partAudioData,
-          durations: partDurations,
-          questions: part.questions || [],
-          cueCardTopic: partNum === 2 ? (part as any).cue_card_topic : undefined,
-          cueCardContent: partNum === 2 ? (part as any).cue_card_content : undefined,
-          instruction: part.instruction,
-          topic: test?.topic,
-          difficulty: test?.difficulty,
-        },
-      });
-
-      if (error) {
-        console.error(`[AIPracticeSpeakingTest] Background evaluation error for Part ${partNum}:`, error);
-      } else if (data?.partResult) {
-        console.log(`[AIPracticeSpeakingTest] Part ${partNum} evaluation complete`);
-        setPartEvaluations(prev => ({
-          ...prev,
-          [partNum]: data.partResult,
-        }));
-      }
-    } catch (err) {
-      console.error(`[AIPracticeSpeakingTest] Error evaluating Part ${partNum}:`, err);
-    } finally {
-      setEvaluatingParts(prev => {
-        const next = new Set(prev);
-        next.delete(partNum);
-        return next;
-      });
-    }
-  }, [testId, test]);
 
   const submitTest = async () => {
     if (exitRequestedRef.current || !isMountedRef.current) return;

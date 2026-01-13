@@ -374,6 +374,15 @@ async function runEvaluation(
   // Calculate band score
   const overallBand = result.overall_band || calculateBand(result);
 
+  // Build public audio URLs (client cannot access R2_PUBLIC_URL)
+  const publicBase = (Deno.env.get('R2_PUBLIC_URL') || '').replace(/\/$/, '');
+  const audioUrls: Record<string, string> = {};
+  if (publicBase) {
+    for (const [k, r2Key] of Object.entries(file_paths as Record<string, string>)) {
+      audioUrls[k] = `${publicBase}/${String(r2Key).replace(/^\//, '')}`;
+    }
+  }
+
   // Save to ai_practice_results
   const { data: resultRow, error: saveError } = await supabaseService
     .from('ai_practice_results')
@@ -386,7 +395,13 @@ async function runEvaluation(
       total_questions: audioContents.length,
       time_spent_seconds: durations ? Math.round(Object.values(durations as Record<string, number>).reduce((a, b) => a + b, 0)) : 60,
       question_results: result,
-      answers: file_paths,
+      // IMPORTANT: store client-usable audio_urls (and keep file_paths for internal use)
+      answers: {
+        audio_urls: audioUrls,
+        transcripts_by_part: {},
+        transcripts_by_question: {},
+        file_paths,
+      },
       completed_at: new Date().toISOString(),
     })
     .select()
@@ -399,8 +414,8 @@ async function runEvaluation(
   // Mark job as completed - this triggers Realtime notification to frontend
   await supabaseService
     .from('speaking_evaluation_jobs')
-    .update({ 
-      status: 'completed', 
+    .update({
+      status: 'completed',
       result_id: resultRow?.id,
       completed_at: new Date().toISOString(),
     })
