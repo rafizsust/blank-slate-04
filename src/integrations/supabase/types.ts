@@ -974,6 +974,66 @@ export type Database = {
         }
         Relationships: []
       }
+      speaking_evaluation_jobs: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          difficulty: string | null
+          durations: Json | null
+          file_paths: Json
+          fluency_flag: boolean | null
+          id: string
+          last_error: string | null
+          max_retries: number | null
+          preset_id: string | null
+          result_id: string | null
+          retry_count: number | null
+          status: string
+          test_id: string
+          topic: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          difficulty?: string | null
+          durations?: Json | null
+          file_paths?: Json
+          fluency_flag?: boolean | null
+          id?: string
+          last_error?: string | null
+          max_retries?: number | null
+          preset_id?: string | null
+          result_id?: string | null
+          retry_count?: number | null
+          status?: string
+          test_id: string
+          topic?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          difficulty?: string | null
+          durations?: Json | null
+          file_paths?: Json
+          fluency_flag?: boolean | null
+          id?: string
+          last_error?: string | null
+          max_retries?: number | null
+          preset_id?: string | null
+          result_id?: string | null
+          retry_count?: number | null
+          status?: string
+          test_id?: string
+          topic?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       speaking_question_groups: {
         Row: {
           created_at: string | null

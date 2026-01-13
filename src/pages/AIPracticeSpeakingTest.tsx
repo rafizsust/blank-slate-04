@@ -135,9 +135,9 @@ export default function AIPracticeSpeakingTest() {
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
 
-  // Background evaluation state
-  const [partEvaluations, setPartEvaluations] = useState<Record<number, any>>({});
-  const [evaluatingParts, setEvaluatingParts] = useState<Set<number>>(new Set());
+  // Background evaluation state (kept for compatibility but not used in async flow)
+  const [_partEvaluations, setPartEvaluations] = useState<Record<number, any>>({});
+  const [_evaluatingParts, setEvaluatingParts] = useState<Set<number>>(new Set());
   const [evaluationStep, setEvaluationStep] = useState(0);
   
   // Submission error state (for resubmit capability)
@@ -956,34 +956,21 @@ export default function AIPracticeSpeakingTest() {
       if (!keys.length) {
         toast({
           title: 'No Recording Found',
-          description: 'No audio was recorded. Please try again and ensure your microphone is working.',
+          description: 'No audio was recorded. Please try again.',
           variant: 'destructive',
         });
         setPhase('done');
         return;
       }
 
-      // Wait for any pending part evaluations (background evaluations)
-      if (evaluatingParts.size > 0) {
-        console.log('[AIPracticeSpeakingTest] Waiting for pending part evaluations...');
-        const maxWait = 15000; // Reduced wait since we're doing async flow
-        const startWait = Date.now();
-        while (evaluatingParts.size > 0 && Date.now() - startWait < maxWait) {
-          if (exitRequestedRef.current || !isMountedRef.current) return;
-          await new Promise(r => setTimeout(r, 300));
-        }
-      }
-
-      // Get user ID for R2 path
+      // Get user ID
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        throw new Error('User not authenticated');
-      }
+      if (!user) throw new Error('User not authenticated');
 
       setEvaluationStep(1);
       console.log('[AIPracticeSpeakingTest] Step 1: Uploading audio files to R2...');
 
-      // STEP 1: Upload all audio files to R2 first (instant for user)
+      // STEP 1: Upload all audio files to R2
       const filePaths: Record<string, string> = {};
       const durations: Record<string, number> = {};
 
@@ -997,119 +984,109 @@ export default function AIPracticeSpeakingTest() {
 
         if (blob.size === 0) continue;
 
-        // Convert to MP3 for better compatibility
-        const mp3File = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
-          // Convert data URL back to blob for upload
+        // Convert to MP3 for compatibility
+        const mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
           const response = await fetch(dataUrl);
           return response.blob();
         });
 
-        // Upload to R2 via upload-speaking-audio edge function
-        // R2 path will be determined by the edge function
-        
         try {
           const { data: uploadResult, error: uploadError } = await supabase.functions.invoke('upload-speaking-audio', {
             body: {
               testId,
               partNumber: seg.partNumber,
-              audioData: { [key]: await blobToDataUrl(mp3File) },
+              audioData: { [key]: await blobToDataUrl(mp3Blob) },
             },
           });
 
-          if (uploadError) {
-            console.error(`[AIPracticeSpeakingTest] Upload error for ${key}:`, uploadError);
-            throw new Error(`Failed to upload audio: ${uploadError.message}`);
-          }
+          if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
 
           if (uploadResult?.uploadedUrls?.[key]) {
-            // Extract the R2 key from the URL
             const uploadedUrl = uploadResult.uploadedUrls[key];
+            // Extract R2 path from URL
             const urlParts = uploadedUrl.split('/');
-            const r2Key = urlParts.slice(3).join('/'); // Remove protocol and domain
+            const r2Key = urlParts.slice(3).join('/');
             filePaths[key] = r2Key;
             console.log(`[AIPracticeSpeakingTest] Uploaded ${key} -> ${r2Key}`);
           }
         } catch (uploadErr) {
-          console.error(`[AIPracticeSpeakingTest] Failed to upload ${key}:`, uploadErr);
+          console.error(`[AIPracticeSpeakingTest] Upload error for ${key}:`, uploadErr);
           throw uploadErr;
         }
       }
 
       if (Object.keys(filePaths).length === 0) {
-        throw new Error('No audio files were uploaded successfully');
+        throw new Error('No audio files were uploaded');
       }
 
       setEvaluationStep(2);
-      console.log(`[AIPracticeSpeakingTest] Step 2: Uploaded ${Object.keys(filePaths).length} files. Triggering async evaluation...`);
+      console.log(`[AIPracticeSpeakingTest] Step 2: Triggering async evaluation (${Object.keys(filePaths).length} files)...`);
 
-      // Calculate Part 2 speaking duration for fluency flag
+      // Calculate Part 2 fluency flag
       const part2Duration = Object.entries(segments)
         .filter(([, s]) => s.partNumber === 2)
         .reduce((acc, [, s]) => acc + (s.duration || 0), 0);
-
       const fluencyFlag = part2Duration > 0 && part2Duration < PART2_MIN_SPEAKING;
 
-      // STEP 2: Trigger async evaluation with just file paths (non-blocking)
-      // User gets instant feedback - evaluation happens in background
-      const { data, error } = await supabase.functions.invoke('evaluate-ai-speaking', {
+      // STEP 2: Trigger ASYNC evaluation - returns immediately with 202
+      const { data, error } = await supabase.functions.invoke('evaluate-speaking-async', {
         body: {
           testId,
-          audioData: {}, // Empty - we're using filePaths now
-          filePaths, // NEW: R2 file paths
+          filePaths,
           durations,
           topic: test?.topic,
           difficulty: test?.difficulty,
-          part2SpeakingDuration: part2Duration,
           fluencyFlag,
-          preEvaluatedParts: partEvaluations,
         },
       });
 
       if (exitRequestedRef.current || !isMountedRef.current) return;
 
       if (error) {
-        console.error('[AIPracticeSpeakingTest] Evaluation invoke error:', error);
-        throw new Error(error.message || 'Network error during submission');
+        console.error('[AIPracticeSpeakingTest] Async evaluation error:', error);
+        throw new Error(error.message || 'Submission failed');
       }
 
-      if (data?.error) {
-        console.error('[AIPracticeSpeakingTest] Edge function error:', data.error, data.code);
+      // Check for 202 Accepted (async) or success
+      if (data?.success || data?.jobId) {
+        console.log('[AIPracticeSpeakingTest] Submission accepted, jobId:', data.jobId);
+        setEvaluationStep(3);
+
+        // Delete persisted audio
+        if (testId) await deleteAudioSegments(testId);
+
+        // Track topic completion
+        if (test?.topic) incrementCompletion(test.topic);
+
+        // Show success toast
+        toast({
+          title: 'Test Submitted!',
+          description: 'Your results will be ready in a moment.',
+        });
+
+        setPhase('done');
+
+        // Navigate to results page - it will show loading until results are ready
+        if (!exitRequestedRef.current && isMountedRef.current) {
+          await exitFullscreen();
+          navigate(`/ai-practice/speaking/results/${testId}`);
+        }
+      } else if (data?.error) {
         throw new Error(data.error);
       }
 
-      setEvaluationStep(3);
-      console.log('[AIPracticeSpeakingTest] Submission successful, model used:', data?.usedModel);
-
-      // Delete persisted audio after successful submission
-      if (testId) {
-        await deleteAudioSegments(testId);
-      }
-
-      // Track topic completion
-      if (test?.topic) {
-        incrementCompletion(test.topic);
-      }
-
-      setPhase('done');
-
-      if (!exitRequestedRef.current && isMountedRef.current) {
-        // Exit fullscreen before navigating to results
-        await exitFullscreen();
-        navigate(`/ai-practice/speaking/results/${testId}`);
-      }
     } catch (err: any) {
       console.error('[AIPracticeSpeakingTest] Submission error:', err);
 
       const errDesc = describeApiError(err);
 
-      // Persist audio to IndexedDB for later resubmission
+      // Persist audio for retry
       const segments = audioSegmentsRef.current;
       if (testId && Object.keys(segments).length > 0) {
         await saveAllAudioSegments(testId, segments);
-        console.log('[AIPracticeSpeakingTest] Audio persisted to IndexedDB for resubmission');
+        console.log('[AIPracticeSpeakingTest] Audio persisted for retry');
       }
 
-      // Store error and switch to error state (preserve audio for resubmit)
       if (isMountedRef.current) {
         setSubmissionError(errDesc);
         setPhase('submission_error');
