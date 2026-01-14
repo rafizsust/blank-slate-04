@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Progress } from '@/components/ui/progress';
 import { AlertTriangle, CheckCircle2, Target, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   READING_TOPICS,
   LISTENING_TOPICS,
@@ -22,12 +23,12 @@ interface CoverageData {
   count: number;
 }
 
-interface GapItem {
+interface CombinationItem {
   module: string;
   questionType: string;
   difficulty: string;
   topic: string;
-  existingCount: number;
+  count: number;
 }
 
 const MODULES = ['reading', 'listening', 'writing', 'speaking'];
@@ -52,8 +53,9 @@ function getTopicsForModule(module: string): readonly string[] {
 
 export default function PresetCoverageGaps() {
   const [selectedModule, setSelectedModule] = useState<string>('all');
-  const [coverageData, setCoverageData] = useState<CoverageData[]>([]);
-  const [gaps, setGaps] = useState<GapItem[]>([]);
+  const [viewMode, setViewMode] = useState<'gaps' | 'all'>('gaps');
+  const [allCombinations, setAllCombinations] = useState<CombinationItem[]>([]);
+  const [gaps, setGaps] = useState<CombinationItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchCoverage = async () => {
@@ -86,10 +88,9 @@ export default function PresetCoverageGaps() {
         }
       });
 
-      setCoverageData(Array.from(countMap.values()));
-
-      // Calculate gaps
-      const gapsList: GapItem[] = [];
+      // Calculate all combinations with counts
+      const combinationsList: CombinationItem[] = [];
+      const gapsList: CombinationItem[] = [];
       const modulesToCheck = selectedModule === 'all' ? MODULES : [selectedModule];
 
       for (const mod of modulesToCheck) {
@@ -101,28 +102,42 @@ export default function PresetCoverageGaps() {
             for (const topic of topics) {
               const key = `${mod}|${qType}|${diff}|${topic}`;
               const existing = countMap.get(key);
-              if (!existing || existing.count < 1) {
-                gapsList.push({
-                  module: mod,
-                  questionType: qType,
-                  difficulty: diff,
-                  topic: topic,
-                  existingCount: existing?.count || 0,
-                });
+              const count = existing?.count || 0;
+              
+              const item: CombinationItem = {
+                module: mod,
+                questionType: qType,
+                difficulty: diff,
+                topic: topic,
+                count: count,
+              };
+              
+              combinationsList.push(item);
+              
+              if (count < 1) {
+                gapsList.push(item);
               }
             }
           }
         }
       }
 
-      // Sort gaps by module, then by topic
+      // Sort by count (ascending for gaps view - show zeros first), then by module/topic
+      combinationsList.sort((a, b) => {
+        if (a.count !== b.count) return a.count - b.count;
+        if (a.module !== b.module) return a.module.localeCompare(b.module);
+        if (a.difficulty !== b.difficulty) return a.difficulty.localeCompare(b.difficulty);
+        return a.topic.localeCompare(b.topic);
+      });
+
       gapsList.sort((a, b) => {
         if (a.module !== b.module) return a.module.localeCompare(b.module);
         if (a.difficulty !== b.difficulty) return a.difficulty.localeCompare(b.difficulty);
         return a.topic.localeCompare(b.topic);
       });
 
-      setGaps(gapsList.slice(0, 50)); // Show top 50 gaps
+      setAllCombinations(combinationsList);
+      setGaps(gapsList.slice(0, 100)); // Show top 100 gaps
     } catch (err) {
       console.error('Error fetching coverage:', err);
     } finally {
@@ -135,7 +150,6 @@ export default function PresetCoverageGaps() {
   }, [selectedModule]);
 
   // Calculate coverage stats
-  const totalPresets = coverageData.length;
   const modulesToCheck = selectedModule === 'all' ? MODULES : [selectedModule];
   let totalPossible = 0;
   for (const mod of modulesToCheck) {
@@ -143,7 +157,10 @@ export default function PresetCoverageGaps() {
     const qTypes = QUESTION_TYPES[mod] || ['mixed'];
     totalPossible += topics.length * qTypes.length * DIFFICULTIES.length;
   }
-  const coveragePercent = totalPossible > 0 ? Math.round((totalPresets / totalPossible) * 100) : 0;
+  
+  const coveredCombinations = allCombinations.filter(c => c.count > 0).length;
+  const coveragePercent = totalPossible > 0 ? Math.round((coveredCombinations / totalPossible) * 100) : 0;
+  const totalPresets = allCombinations.reduce((sum, c) => sum + c.count, 0);
 
   const getModuleColor = (mod: string) => {
     switch (mod) {
@@ -164,13 +181,25 @@ export default function PresetCoverageGaps() {
     }
   };
 
+  const getCountBadge = (count: number) => {
+    if (count === 0) {
+      return <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200">0</Badge>;
+    }
+    if (count < 3) {
+      return <Badge variant="outline" className="bg-amber-50 text-amber-600 border-amber-200">{count}</Badge>;
+    }
+    return <Badge variant="outline" className="bg-green-50 text-green-600 border-green-200">{count}</Badge>;
+  };
+
+  const displayList = viewMode === 'gaps' ? gaps : allCombinations.slice(0, 100);
+
   return (
     <Card className="border-0 shadow-lg">
       <CardHeader>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Target className="h-5 w-5 text-primary" />
-            <CardTitle>Preset Coverage Gaps</CardTitle>
+            <CardTitle>Preset Coverage</CardTitle>
           </div>
           <div className="flex items-center gap-2">
             <Select value={selectedModule} onValueChange={setSelectedModule}>
@@ -191,7 +220,7 @@ export default function PresetCoverageGaps() {
           </div>
         </div>
         <CardDescription>
-          Identify missing presets to generate next. Shows combinations of module + question type + difficulty + topic without published presets.
+          View preset counts for each combination of module + question type + difficulty + topic.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -199,7 +228,9 @@ export default function PresetCoverageGaps() {
         <div className="mb-6 p-4 bg-muted/50 rounded-lg">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium">Overall Coverage</span>
-            <span className="text-sm text-muted-foreground">{totalPresets} / {totalPossible} combinations</span>
+            <span className="text-sm text-muted-foreground">
+              {coveredCombinations} / {totalPossible} combinations ({totalPresets} total presets)
+            </span>
           </div>
           <Progress value={coveragePercent} className="h-2" />
           <div className="flex items-center gap-2 mt-2">
@@ -212,47 +243,65 @@ export default function PresetCoverageGaps() {
           </div>
         </div>
 
-        {/* Gaps List */}
+        {/* View Mode Tabs */}
+        <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'gaps' | 'all')} className="mb-4">
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="gaps">
+              Gaps Only ({gaps.length})
+            </TabsTrigger>
+            <TabsTrigger value="all">
+              All Combinations
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        {/* Combinations List */}
         {loading ? (
           <div className="space-y-2">
             {[...Array(5)].map((_, i) => (
               <div key={i} className="h-12 bg-muted animate-pulse rounded" />
             ))}
           </div>
-        ) : gaps.length === 0 ? (
+        ) : displayList.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground">
             <CheckCircle2 className="h-12 w-12 mx-auto mb-2 text-green-500" />
-            <p>Great coverage! No major gaps found.</p>
+            <p>Great coverage! No gaps found.</p>
           </div>
         ) : (
           <div className="space-y-2 max-h-[400px] overflow-y-auto">
-            {gaps.map((gap, idx) => (
+            {displayList.map((item, idx) => (
               <div
                 key={idx}
                 className="flex items-center justify-between p-3 border rounded-lg hover:bg-muted/50 transition-colors"
               >
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Badge variant="outline" className={getModuleColor(gap.module)}>
-                    {gap.module}
+                <div className="flex items-center gap-2 flex-wrap flex-1">
+                  <Badge variant="outline" className={getModuleColor(item.module)}>
+                    {item.module}
                   </Badge>
                   <Badge variant="secondary" className="text-xs">
-                    {gap.questionType.replace(/_/g, ' ')}
+                    {item.questionType.replace(/_/g, ' ')}
                   </Badge>
-                  <Badge className={getDifficultyColor(gap.difficulty)}>
-                    {gap.difficulty}
+                  <Badge className={getDifficultyColor(item.difficulty)}>
+                    {item.difficulty}
                   </Badge>
+                  <span className="text-sm text-muted-foreground truncate max-w-[200px]" title={item.topic}>
+                    {item.topic}
+                  </span>
                 </div>
-                <span className="text-sm text-muted-foreground truncate max-w-[200px]" title={gap.topic}>
-                  {gap.topic}
-                </span>
+                <div className="flex items-center gap-2 ml-2">
+                  {getCountBadge(item.count)}
+                </div>
               </div>
             ))}
           </div>
         )}
 
-        {gaps.length > 0 && (
+        {displayList.length > 0 && (
           <p className="text-xs text-muted-foreground mt-4">
-            Showing top 50 gaps. Generate presets via the Test Factory to fill these gaps.
+            {viewMode === 'gaps' 
+              ? `Showing ${displayList.length} gaps. Generate presets via the Test Factory to fill these gaps.`
+              : `Showing first 100 combinations sorted by count (lowest first).`
+            }
           </p>
         )}
       </CardContent>

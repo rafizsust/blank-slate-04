@@ -6,8 +6,13 @@ import {
   getActiveGeminiKeysForModels, 
   markModelQuotaExhausted,
   isQuotaExhaustedError,
-  isDailyQuotaExhaustedError
+  isDailyQuotaExhaustedError,
+  isModelExhaustedForKey
 } from "../_shared/apiKeyQuotaUtils.ts";
+import { 
+  createPerformanceLogger,
+  classifyGeminiErrorStatus
+} from "../_shared/performanceLogger.ts";
 
 /**
  * Speaking Evaluate Job - OPTIMIZED VERSION
@@ -359,6 +364,9 @@ serve(async (req) => {
 
       // Evaluate this part
       let partResult: any = null;
+      
+      // Create performance logger for this task
+      const perfLogger = createPerformanceLogger('evaluate_speaking');
 
       for (const candidateKey of keyQueue) {
         if (partResult) break;
@@ -369,7 +377,19 @@ serve(async (req) => {
           for (const modelName of GEMINI_MODELS) {
             if (partResult) break;
 
+            // CRITICAL FIX: Skip models already marked as exhausted for this key
+            // This prevents retrying exhausted models across different keys
+            if (!candidateKey.isUserProvided && candidateKey.keyId) {
+              // Need to re-fetch the key's quota status from the dbApiKeys we have
+              const keyRecord = dbApiKeys.find(k => k.id === candidateKey.keyId);
+              if (keyRecord && isModelExhaustedForKey(keyRecord, modelName)) {
+                console.log(`[speaking-evaluate-job] Skipping ${modelName} - already exhausted for key ${candidateKey.keyId.slice(0,8)}...`);
+                continue;
+              }
+            }
+
             console.log(`[speaking-evaluate-job] Part ${partToProcess}: trying ${modelName}`);
+            const callStart = Date.now();
             
             const model = genAI.getGenerativeModel({ 
               model: modelName,
@@ -397,9 +417,11 @@ serve(async (req) => {
                   `Gemini ${modelName} Part ${partToProcess}`
                 );
                 const text = response.response?.text?.() || '';
+                const responseTimeMs = Date.now() - callStart;
 
                 if (!text) {
                   console.warn(`[speaking-evaluate-job] Empty response from ${modelName}`);
+                  await perfLogger.logError(modelName, 'Empty response', responseTimeMs, candidateKey.keyId || undefined);
                   break;
                 }
 
@@ -407,21 +429,32 @@ serve(async (req) => {
                 if (parsed) {
                   partResult = parsed;
                   console.log(`[speaking-evaluate-job] Part ${partToProcess} success with ${modelName}`);
+                  await perfLogger.logSuccess(modelName, responseTimeMs, candidateKey.keyId || undefined);
                   break;
                 } else {
                   console.warn(`[speaking-evaluate-job] Failed to parse JSON from ${modelName}`);
+                  await perfLogger.logError(modelName, 'Failed to parse JSON', responseTimeMs, candidateKey.keyId || undefined);
                   break;
                 }
               } catch (err: any) {
                 const errMsg = String(err?.message || '');
+                const responseTimeMs = Date.now() - callStart;
                 console.error(`[speaking-evaluate-job] ${modelName} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
 
                 // Check for PERMANENT daily quota exhaustion - use strict check
                 if (isDailyQuotaExhaustedError(err)) {
                   console.log(`[speaking-evaluate-job] Daily quota exhausted for ${modelName}, marking model exhausted`);
+                  await perfLogger.logQuotaExceeded(modelName, errMsg.slice(0, 200), candidateKey.keyId || undefined);
                   
                   if (!candidateKey.isUserProvided && candidateKey.keyId) {
                     await markModelQuotaExhausted(supabaseService, candidateKey.keyId, modelName);
+                    // Refresh the key record in our local cache so subsequent iterations skip this model
+                    const keyIdx = dbApiKeys.findIndex(k => k.id === candidateKey.keyId);
+                    if (keyIdx !== -1) {
+                      const today = new Date().toISOString().split('T')[0];
+                      // Update the local cache to reflect exhaustion
+                      (dbApiKeys[keyIdx] as any)[`${modelName.replace(/-/g, '_').replace(/\./g, '_')}_exhausted`] = true;
+                    }
                   }
                   
                   // CRITICAL: Continue to next model instead of throwing
@@ -442,6 +475,7 @@ serve(async (req) => {
                   } else {
                     // Retries exhausted for rate limit - try next model instead of throwing
                     console.log(`[speaking-evaluate-job] Rate limit retries exhausted for ${modelName}, trying next model...`);
+                    await perfLogger.logError(modelName, 'Rate limit retries exhausted: ' + errMsg.slice(0, 100), responseTimeMs, candidateKey.keyId || undefined);
                     break; // Break retry loop, continue to next model
                   }
                 }
@@ -452,6 +486,7 @@ serve(async (req) => {
                   await sleep(delay);
                   continue;
                 }
+                await perfLogger.logError(modelName, errMsg.slice(0, 200), responseTimeMs, candidateKey.keyId || undefined);
                 break;
               }
             }
