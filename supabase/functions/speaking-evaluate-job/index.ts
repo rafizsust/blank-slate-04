@@ -596,7 +596,33 @@ CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}, Qu
 ${fluencyFlag ? '⚠️ Part 2 speaking time under 80 seconds - apply fluency penalty.' : ''}
 
 ══════════════════════════════════════════════════════════════
-CRITICAL: AUDIO-TO-QUESTION MAPPING (FIXED - DO NOT CHANGE!)
+🚨🚨🚨 CRITICAL TRANSCRIPTION RULES - READ CAREFULLY 🚨🚨🚨
+══════════════════════════════════════════════════════════════
+
+**ZERO HALLUCINATION POLICY**: You MUST transcribe ONLY what the candidate ACTUALLY SAID in each audio file.
+
+🚫 ABSOLUTELY FORBIDDEN:
+- DO NOT invent, fabricate, or guess what the candidate might have said
+- DO NOT create plausible answers based on the question context
+- DO NOT fill in gaps with assumed content
+- DO NOT paraphrase or improve what was said
+- DO NOT generate example answers if you cannot hear the audio
+
+✅ YOU MUST:
+- Transcribe the EXACT words spoken in each audio file, word-for-word
+- Include ALL filler words: "uh", "um", "like", "you know", "so", etc.
+- Include false starts, repetitions, and self-corrections
+- If a candidate says "Question one" or "Question two", write EXACTLY that
+- If the audio is unclear, write "[INAUDIBLE]" for unclear portions
+- If there is silence or no speech, write "[NO SPEECH DETECTED]"
+- If the audio is too short/empty, write "[AUDIO TOO SHORT - NO CONTENT]"
+
+VERIFICATION CHECK: Before submitting, ask yourself for EACH transcript:
+"Did I hear these exact words in the audio, or did I make this up?"
+If you made it up, you have FAILED and must fix it.
+
+══════════════════════════════════════════════════════════════
+AUDIO-TO-QUESTION MAPPING (FIXED ORDER)
 ══════════════════════════════════════════════════════════════
 The ${numQ} audio files are provided in this EXACT fixed order:
 
@@ -606,12 +632,39 @@ RULES:
 1. Audio file at position 0 = AUDIO_0 = first segment in the list above
 2. Audio file at position 1 = AUDIO_1 = second segment in the list above
 3. Continue this pattern for ALL files
-4. The file names contain "AUDIO_INDEX_N" where N is the position
-5. DO NOT reorder, swap, or guess. The mapping is FIXED.
-6. Transcribe each audio to its corresponding question EXACTLY as mapped above
+4. DO NOT reorder or swap. The mapping is FIXED.
 
 ══════════════════════════════════════════════════════════════
-OFFICIAL IELTS BAND DESCRIPTORS (MANDATORY)
+SCORING FOR POOR/OFF-TOPIC RESPONSES (STRICTLY ENFORCE)
+══════════════════════════════════════════════════════════════
+
+The candidate may give completely off-topic or inadequate responses. Score them HARSHLY:
+
+🔴 UNACCEPTABLE RESPONSES - Band 1.0-2.0:
+- Candidate just says "Question one", "Question two", or the question number
+- No actual answer to the question
+- Complete silence or unintelligible mumbling
+- Less than 5 words total with no meaningful content
+
+🟠 VERY POOR RESPONSES - Band 2.5-3.5:
+- Only 5-10 words with minimal relevance
+- Generic one-liner that doesn't address the question
+- "I don't know" type responses
+
+🟡 POOR RESPONSES - Band 4.0-4.5:
+- 10-20 words with some attempt at answering
+- Limited vocabulary, basic grammar only
+- Significant hesitation and repetition
+
+📊 WORD COUNT GUIDELINES (MANDATORY):
+- Part 1: Expect 30-60 words per answer for Band 5-6
+- Part 2: Expect 150-250 words for Band 5-6
+- Part 3: Expect 40-80 words per answer for Band 5-6
+
+If response is significantly shorter, cap the band score accordingly.
+
+══════════════════════════════════════════════════════════════
+OFFICIAL IELTS BAND DESCRIPTORS
 ══════════════════════════════════════════════════════════════
 
 FLUENCY AND COHERENCE (FC):
@@ -619,69 +672,100 @@ FLUENCY AND COHERENCE (FC):
 - Band 7: Speaks at length without noticeable effort; some language-related hesitation
 - Band 5: Maintains flow with repetition/self-correction/slow speech
 - Band 4: Cannot respond without noticeable pauses; frequent repetition
+- Band 3: Pauses occur frequently; simple connectives only
+- Band 2: Speech is very slow and fragmented; minimal communication
 
 LEXICAL RESOURCE (LR):
 - Band 9: Full flexibility; idiomatic language naturally
 - Band 7: Flexible vocabulary; some less common/idiomatic vocabulary
 - Band 5: Limited vocabulary; pauses to search for words
 - Band 4: Basic vocabulary, repetitive or inappropriate
+- Band 3: Simple vocabulary; meaning unclear at times
+- Band 2: Only isolated words or memorized utterances
 
 GRAMMATICAL RANGE AND ACCURACY (GRA):
 - Band 9: Full range of structures; consistently accurate
 - Band 7: Range of complex structures; frequently error-free
 - Band 5: Basic sentence forms; limited complex structures
 - Band 4: Basic sentences; subordinate structures rare
+- Band 3: Attempts basic sentence forms; errors common
+- Band 2: Cannot produce basic sentence forms
 
 PRONUNCIATION (P):
 - Band 9: Full range of features with precision
 - Band 7: Most features of Band 8; some L1 influence
 - Band 5: Some Band 6 features; mispronounces individual words
 - Band 4: Limited features; frequent mispronunciations
+- Band 3: Very limited control; frequent misunderstandings
+- Band 2: Pronunciation makes comprehension very difficult
 
-SCORING GUIDELINES:
-- Short responses (<15 words): Max Band 4.0-4.5
-- Off-topic: Severe FC penalty (1-2 bands)
-- No response: Band 1.0-2.0
-- Part 2: Holistic evaluation - quality > quantity
-- Excellent concise Part 2 that fully addresses cue card can score Band 8+
+══════════════════════════════════════════════════════════════
+MODEL ANSWERS REQUIREMENTS (MANDATORY)
+══════════════════════════════════════════════════════════════
 
-EXACT JSON OUTPUT SCHEMA:
+For EACH question, you MUST provide a modelAnswer showing how a Band 7-8 candidate would respond.
+
+Word count requirements for model answers:
+- Part 1: ~75 words (natural, conversational)
+- Part 2: ~250-300 words (covers all cue card points)
+- Part 3: ~120-150 words (analytical with examples)
+
+Each modelAnswer MUST include:
+- estimatedBand: The candidate's actual band for THIS question
+- targetBand: One band higher (or 8.5 if already high)
+- modelAnswer: A complete Band 7-8 response demonstrating ideal techniques
+- whyItWorks: 3-4 specific reasons this answer would score well
+- keyImprovements: 3-4 specific things the candidate should improve
+
+══════════════════════════════════════════════════════════════
+EXACT JSON OUTPUT SCHEMA (FOLLOW PRECISELY)
+══════════════════════════════════════════════════════════════
 {
   "overall_band": 6.0,
   "criteria": {
-    "fluency_coherence": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
+    "fluency_coherence": {"band": 6.0, "feedback": "Specific assessment of this criterion", "strengths": ["str1", "str2"], "weaknesses": ["weak1"], "suggestions": ["tip1", "tip2"]},
     "lexical_resource": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "grammatical_range": {"band": 5.5, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "pronunciation": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]}
   },
-  "summary": "Overall performance summary",
-  "lexical_upgrades": [{"original": "...", "upgraded": "...", "context": "..."}],
-  "part_analysis": [{"part_number": 1, "performance_notes": "...", "key_moments": [...]}],
-  "improvement_priorities": ["Priority 1...", "Priority 2..."],
-  "transcripts_by_part": {"1": "...", "2": "...", "3": "..."},
+  "summary": "2-4 sentence overall performance summary",
+  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example usage"}],
+  "part_analysis": [
+    {"part_number": 1, "performance_notes": "How the candidate performed in Part 1...", "key_moments": ["Notable strength or issue 1", "Notable moment 2"], "areas_for_improvement": ["Improvement 1", "Improvement 2"]}
+  ],
+  "improvement_priorities": ["Priority 1: Most important thing to work on", "Priority 2: Second priority"],
+  "strengths_to_maintain": ["Strength 1: Something they did well", "Strength 2: Another positive"],
+  "transcripts_by_part": {"1": "Full concatenated Part 1 transcript...", "2": "...", "3": "..."},
   "transcripts_by_question": {
-    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "..."}],
+    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "EXACT words spoken by candidate"}],
     "2": [...],
     "3": [...]
   },
   "modelAnswers": [
     {
-      "segment_key": "MUST match segment_key from audio mapping",
+      "segment_key": "MUST match segment_key from audio mapping above",
       "partNumber": 1,
       "questionNumber": 1,
-      "question": "Question text",
-      "candidateResponse": "EXACT transcript",
+      "question": "The question text",
+      "candidateResponse": "EXACT transcript from the audio - NO FABRICATION",
       "estimatedBand": 5.5,
-      "modelAnswer": "Model answer",
-      "whyItWorks": [...],
-      "keyImprovements": [...]
+      "targetBand": 6.5,
+      "modelAnswer": "A complete ~75 word (Part 1) / ~300 word (Part 2) / ~150 word (Part 3) model response...",
+      "whyItWorks": ["Uses topic vocabulary", "Clear structure", "Natural examples"],
+      "keyImprovements": ["Add more detail", "Vary vocabulary", "Use complex sentences"]
     }
   ]
 }
 
 QUESTIONS JSON: ${JSON.stringify(questions)}
 
-REMINDER: There are exactly ${numQ} audio files. Return exactly ${numQ} modelAnswers with correct segment_keys matching the AUDIO_0 to AUDIO_${numQ - 1} mapping above.`;
+FINAL REMINDER:
+1. There are exactly ${numQ} audio files - return exactly ${numQ} modelAnswers
+2. segment_key in each modelAnswer MUST match the AUDIO_0 to AUDIO_${numQ - 1} mapping
+3. candidateResponse MUST be the EXACT words heard in the audio - NEVER fabricate
+4. If the candidate said something irrelevant like "Question one" - transcribe it and score Band 1-2
+5. Model answers MUST be substantial (75/300/150 words per part)
+6. part_analysis MUST have entries for each part with real performance notes`;
 }
 
 function parseJson(text: string): any {

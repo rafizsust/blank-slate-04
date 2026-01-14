@@ -896,76 +896,84 @@ export default function AISpeakingResults() {
 
             {/* Part-by-Part Analysis */}
             <TabsContent value="parts" className="mt-6 space-y-4">
-              {report.part_analysis && report.part_analysis
-                .filter((p) => availableParts.includes(p.part_number))
-                .map((part) => (
-                <Card key={part.part_number}>
-                  <CardHeader 
-                    className="cursor-pointer"
-                    onClick={() => togglePart(part.part_number)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-lg flex items-center gap-2">
-                        <Mic className="w-5 h-5 text-primary" />
-                        Part {part.part_number}
-                      </CardTitle>
-                      {expandedParts.has(part.part_number) ? (
-                        <ChevronUp className="w-5 h-5 text-muted-foreground" />
-                      ) : (
-                        <ChevronDown className="w-5 h-5 text-muted-foreground" />
-                      )}
-                    </div>
-                  </CardHeader>
-                  {expandedParts.has(part.part_number) && (
-                    <CardContent className="space-y-4">
-                      <p className="text-sm">{part.performance_notes}</p>
-                      
-                      {part.key_moments && part.key_moments.length > 0 && (
-                        <div>
-                          <div className="flex items-center gap-2 mb-2">
-                            <Target className="w-4 h-4 text-primary" />
-                            <span className="font-medium text-sm">Key Moments</span>
+              {report.part_analysis && report.part_analysis.filter((p) => availableParts.includes(p.part_number)).length > 0 ? (
+                report.part_analysis
+                  .filter((p) => availableParts.includes(p.part_number))
+                  .map((part) => (
+                  <Card key={part.part_number}>
+                    <CardHeader 
+                      className="cursor-pointer"
+                      onClick={() => togglePart(part.part_number)}
+                    >
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-lg flex items-center gap-2">
+                          <Mic className="w-5 h-5 text-primary" />
+                          Part {part.part_number}
+                        </CardTitle>
+                        {expandedParts.has(part.part_number) ? (
+                          <ChevronUp className="w-5 h-5 text-muted-foreground" />
+                        ) : (
+                          <ChevronDown className="w-5 h-5 text-muted-foreground" />
+                        )}
+                      </div>
+                    </CardHeader>
+                    {expandedParts.has(part.part_number) && (
+                      <CardContent className="space-y-4">
+                        <p className="text-sm">{part.performance_notes || 'No specific notes for this part.'}</p>
+                        
+                        {part.key_moments && part.key_moments.length > 0 && (
+                          <div>
+                            <div className="flex items-center gap-2 mb-2">
+                              <Target className="w-4 h-4 text-primary" />
+                              <span className="font-medium text-sm">Key Moments</span>
+                            </div>
+                            <ul className="space-y-1 pl-6">
+                              {part.key_moments.map((m, i) => (
+                                <li key={i} className="text-sm text-muted-foreground list-disc">{m}</li>
+                              ))}
+                            </ul>
                           </div>
-                          <ul className="space-y-1 pl-6">
-                            {part.key_moments.map((m, i) => (
-                              <li key={i} className="text-sm text-muted-foreground list-disc">{m}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      
-                      {part.areas_for_improvement && part.areas_for_improvement.length > 0 && (
-                        <div>
-                          <div className="flex items-center gap-2 mb-2">
-                            <TrendingUp className="w-4 h-4 text-warning" />
-                            <span className="font-medium text-sm">Areas for Improvement</span>
+                        )}
+                        
+                        {part.areas_for_improvement && part.areas_for_improvement.length > 0 && (
+                          <div>
+                            <div className="flex items-center gap-2 mb-2">
+                              <TrendingUp className="w-4 h-4 text-warning" />
+                              <span className="font-medium text-sm">Areas for Improvement</span>
+                            </div>
+                            <ul className="space-y-1 pl-6">
+                              {part.areas_for_improvement.map((a, i) => (
+                                <li key={i} className="text-sm text-muted-foreground list-disc">{a}</li>
+                              ))}
+                            </ul>
                           </div>
-                          <ul className="space-y-1 pl-6">
-                            {part.areas_for_improvement.map((a, i) => (
-                              <li key={i} className="text-sm text-muted-foreground list-disc">{a}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
+                        )}
 
-                      {/* Audio Playback if available */}
-                      {result.audio_urls[`part${part.part_number}`] && (
-                        <div className="pt-4 border-t">
-                          <div className="flex items-center gap-2 mb-2">
-                            <Volume2 className="w-4 h-4" />
-                            <span className="font-medium text-sm">Your Recording</span>
+                        {/* Audio Playback if available */}
+                        {result.audio_urls[`part${part.part_number}`] && (
+                          <div className="pt-4 border-t">
+                            <div className="flex items-center gap-2 mb-2">
+                              <Volume2 className="w-4 h-4" />
+                              <span className="font-medium text-sm">Your Recording</span>
+                            </div>
+                            <audio 
+                              controls 
+                              className="w-full" 
+                              src={result.audio_urls[`part${part.part_number}`]} 
+                            />
                           </div>
-                          <audio 
-                            controls 
-                            className="w-full" 
-                            src={result.audio_urls[`part${part.part_number}`]} 
-                          />
-                        </div>
-                      )}
-                    </CardContent>
-                  )}
+                        )}
+                      </CardContent>
+                    )}
+                  </Card>
+                ))
+              ) : (
+                <Card>
+                  <CardContent className="py-8 text-center">
+                    <p className="text-muted-foreground">Part analysis not available for this test. Check the Criteria tab for detailed feedback.</p>
+                  </CardContent>
                 </Card>
-              ))}
+              )}
             </TabsContent>
 
             {/* Improvement Priorities */}

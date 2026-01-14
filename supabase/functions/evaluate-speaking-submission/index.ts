@@ -189,83 +189,126 @@ function buildPrompt(
     : `Parts ${includedParts.join(', ')}`;
 
   const numQ = orderedSegments.length;
+  
+  const audioMappingLines = orderedSegments.map((seg, idx) => 
+    `AUDIO_${idx}: "${seg.segmentKey}" → Part ${seg.partNumber}, Question ${seg.questionNumber}: "${seg.questionText}"`
+  ).join('\n');
 
-  return `You are a SENIOR IELTS Speaking examiner with 15+ years experience. Return ONLY valid JSON, no markdown.
+  return `You are a CERTIFIED SENIOR IELTS Speaking Examiner with 20+ years of experience.
+Evaluate exactly as an official IELTS examiner. Return ONLY valid JSON.
 
 CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}, Parts: ${partsDescription}, Questions: ${numQ}
-${fluencyFlag ? '⚠️ Part 2 under 80s - penalize Fluency & Coherence.' : ''}
+${fluencyFlag ? '⚠️ Part 2 speaking time under 80 seconds - apply fluency penalty.' : ''}
 
-MANDATORY REQUIREMENTS:
-1. Listen to ALL ${numQ} audio files and transcribe EACH one fully
-2. Provide band scores (use "band" key, not "score") for ALL 4 criteria
-3. Create modelAnswers array with EXACTLY ${numQ} entries - one for each audio
-4. Include transcripts_by_question with ALL ${numQ} question transcripts
-5. All band scores must be between 1.0 and 9.0 (not zero!)
+══════════════════════════════════════════════════════════════
+🚨🚨🚨 CRITICAL TRANSCRIPTION RULES - READ CAREFULLY 🚨🚨🚨
+══════════════════════════════════════════════════════════════
 
-EXPERT EXAMINER OBSERVATIONS (CRITICAL):
-1. **Repetition Detection**: Identify if the candidate excessively repeats the same words, phrases, or sentence structures across multiple answers. Minor repetition is acceptable, but flag if:
-   - Same filler phrases appear in >50% of responses
-   - Identical sentence structures used repeatedly
-   - Limited vocabulary range with same words recycled excessively
-   Include specific examples in feedback if detected.
+**ZERO HALLUCINATION POLICY**: You MUST transcribe ONLY what the candidate ACTUALLY SAID in each audio file.
 
-2. **Relevance & Topic Adherence**: Assess whether the candidate:
-   - Actually answers the question asked (not something tangential)
-   - Stays within the question's context
-   - Demonstrates understanding of what is being asked
-   - Flag off-topic or random responses that don't address the question
+🚫 ABSOLUTELY FORBIDDEN:
+- DO NOT invent, fabricate, or guess what the candidate might have said
+- DO NOT create plausible answers based on the question context
+- DO NOT fill in gaps with assumed content
+- DO NOT paraphrase or improve what was said
+- DO NOT generate example answers if you cannot hear the audio
 
-3. **Response Coherence**: Evaluate if responses make logical sense or if the candidate is speaking randomly/incoherently.
+✅ YOU MUST:
+- Transcribe the EXACT words spoken in each audio file, word-for-word
+- Include ALL filler words: "uh", "um", "like", "you know", "so", etc.
+- Include false starts, repetitions, and self-corrections
+- If a candidate says "Question one" or "Question two", write EXACTLY that
+- If the audio is unclear, write "[INAUDIBLE]" for unclear portions
+- If there is silence or no speech, write "[NO SPEECH DETECTED]"
+- If the audio is too short/empty, write "[AUDIO TOO SHORT - NO CONTENT]"
 
-SCORING:
-- Short responses (1-10 words) = Band 4.0-4.5 max
-- Off-topic/irrelevant responses = Penalize Fluency & Coherence
-- Excessive repetition = Penalize Lexical Resource
-- Overall band = weighted average (Part2 x2.0, Part3 x1.5, Part1 x1.0)
+VERIFICATION CHECK: Before submitting, ask yourself for EACH transcript:
+"Did I hear these exact words in the audio, or did I make this up?"
+If you made it up, you have FAILED and must fix it.
 
-MODEL ANSWERS - WORD COUNT REQUIREMENTS (CRITICAL):
-- Part 1 answers: ~75 words each (conversational, natural response)
-- Part 2 answers: ~300 words (full long-turn response with all cue card points)
-- Part 3 answers: ~150 words each (extended discussion with reasoning)
+══════════════════════════════════════════════════════════════
+AUDIO-TO-QUESTION MAPPING (FIXED ORDER)
+══════════════════════════════════════════════════════════════
+The ${numQ} audio files are provided in this EXACT fixed order:
 
-MODEL ANSWERS: estimatedBand = candidate's level, targetBand = next whole band up
-Example: estimatedBand 5.5 → targetBand 6 → provide Band 6 model answer
+${audioMappingLines}
 
-EXACT JSON SCHEMA (follow precisely):
+══════════════════════════════════════════════════════════════
+SCORING FOR POOR/OFF-TOPIC RESPONSES (STRICTLY ENFORCE)
+══════════════════════════════════════════════════════════════
+
+The candidate may give completely off-topic or inadequate responses. Score them HARSHLY:
+
+🔴 UNACCEPTABLE RESPONSES - Band 1.0-2.0:
+- Candidate just says "Question one", "Question two", or the question number
+- No actual answer to the question
+- Complete silence or unintelligible mumbling
+- Less than 5 words total with no meaningful content
+
+🟠 VERY POOR RESPONSES - Band 2.5-3.5:
+- Only 5-10 words with minimal relevance
+- Generic one-liner that doesn't address the question
+- "I don't know" type responses
+
+🟡 POOR RESPONSES - Band 4.0-4.5:
+- 10-20 words with some attempt at answering
+- Limited vocabulary, basic grammar only
+- Significant hesitation and repetition
+
+📊 WORD COUNT GUIDELINES (MANDATORY):
+- Part 1: Expect 30-60 words per answer for Band 5-6
+- Part 2: Expect 150-250 words for Band 5-6
+- Part 3: Expect 40-80 words per answer for Band 5-6
+
+══════════════════════════════════════════════════════════════
+MODEL ANSWERS REQUIREMENTS (MANDATORY)
+══════════════════════════════════════════════════════════════
+
+For EACH question, you MUST provide a modelAnswer showing how a Band 7-8 candidate would respond.
+
+Word count requirements for model answers:
+- Part 1: ~75 words (natural, conversational)
+- Part 2: ~250-300 words (covers all cue card points)
+- Part 3: ~120-150 words (analytical with examples)
+
+Each modelAnswer MUST include all required fields with substantial content.
+
+══════════════════════════════════════════════════════════════
+EXACT JSON OUTPUT SCHEMA (FOLLOW PRECISELY)
+══════════════════════════════════════════════════════════════
 {
   "overall_band": 6.0,
   "criteria": {
-    "fluency_coherence": {"band": 6.0, "feedback": "2-3 sentence assessment including any topic relevance issues", "strengths": ["strength1", "strength2"], "weaknesses": ["weakness1"], "suggestions": ["tip1", "tip2"]},
-    "lexical_resource": {"band": 6.0, "feedback": "Include notes on any excessive word repetition", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
+    "fluency_coherence": {"band": 6.0, "feedback": "Specific assessment", "strengths": ["str1", "str2"], "weaknesses": ["weak1"], "suggestions": ["tip1", "tip2"]},
+    "lexical_resource": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "grammatical_range": {"band": 5.5, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "pronunciation": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]}
   },
-  "summary": "2-4 sentence overall performance summary noting any repetition/relevance concerns",
-  "repetition_analysis": {"detected": true/false, "severity": "none|mild|moderate|excessive", "examples": ["phrase repeated X times"], "impact_on_score": "explanation"},
-  "relevance_analysis": {"overall_on_topic": true/false, "off_topic_questions": [1, 5], "notes": "explanation of any relevance issues"},
-  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example sentence"}],
-  "part_analysis": [{"part_number": 1, "performance_notes": "analysis...", "key_moments": ["..."], "areas_for_improvement": ["..."]}],
-  "improvement_priorities": ["Priority 1: ...", "Priority 2: ..."],
-  "strengths_to_maintain": ["Strength 1: ...", "Strength 2: ..."],
-  "transcripts_by_part": {"1": "Full concatenated transcript for Part 1..."},
+  "summary": "2-4 sentence overall performance summary",
+  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example usage"}],
+  "part_analysis": [
+    {"part_number": 1, "performance_notes": "How the candidate performed...", "key_moments": ["Notable moment 1"], "areas_for_improvement": ["Improvement 1"]}
+  ],
+  "improvement_priorities": ["Priority 1: Most important", "Priority 2: Second priority"],
+  "strengths_to_maintain": ["Strength 1: Something done well"],
+  "transcripts_by_part": {"1": "Full Part 1 transcript...", "2": "...", "3": "..."},
   "transcripts_by_question": {
-    "1": [
-      {"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "Full answer transcript..."},
-      {"segment_key": "part1-q...", "question_number": 2, "question_text": "...", "transcript": "..."}
-    ]
+    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "EXACT words spoken"}],
+    "2": [...],
+    "3": [...]
   },
   "modelAnswers": [
     {
-      "segment_key": "part1-q...",
+      "segment_key": "MUST match segment_key from audio mapping",
       "partNumber": 1,
       "questionNumber": 1,
       "question": "Question text",
-      "candidateResponse": "Full transcript of candidate's answer",
+      "candidateResponse": "EXACT transcript from audio - NO FABRICATION",
       "estimatedBand": 5.5,
-      "targetBand": 6,
-      "modelAnswer": "A comprehensive Band 6 model answer (~75 words for Part1, ~300 words for Part2, ~150 words for Part3)...",
-      "whyItWorks": ["Uses topic-specific vocabulary", "Clear organization"],
-      "keyImprovements": ["Add more examples", "Vary vocabulary"]
+      "targetBand": 6.5,
+      "modelAnswer": "Complete ~75/300/150 word model response...",
+      "whyItWorks": ["Uses topic vocabulary", "Clear structure"],
+      "keyImprovements": ["Add more detail", "Vary vocabulary"]
     }
   ]
 }
@@ -274,7 +317,12 @@ INPUT DATA:
 questions_json: ${questionJson}
 segment_map_json (${numQ} segments to evaluate): ${segmentJson}
 
-CRITICAL: You MUST return exactly ${numQ} entries in modelAnswers array. Follow the word count guidelines for each part. Listen carefully to each audio file.`;
+FINAL REMINDER:
+1. Return exactly ${numQ} modelAnswers with correct segment_keys
+2. candidateResponse MUST be EXACT words from audio - NEVER fabricate
+3. If candidate said "Question one" - transcribe it and score Band 1-2
+4. Model answers must be substantial (75/300/150 words per part)
+5. part_analysis must have real performance notes for each part`;
 }
 
 function parseJson(text: string): any {
