@@ -44,17 +44,16 @@ serve(async (req) => {
     const today = new Date().toISOString().split("T")[0];
 
     // Reset user API keys where quota was exhausted on a previous day
-    // (Keys exhausted TODAY should not be reset yet - they'll be reset tomorrow)
     const { data: userKeysReset, error: userKeysError } = await serviceClient
       .from("user_api_keys")
       .update({
         tts_quota_exhausted: false,
         tts_quota_exhausted_date: null,
-        flash_quota_exhausted: false,
-        flash_quota_exhausted_date: null,
+        flash_2_5_quota_exhausted: false,
+        flash_2_5_quota_exhausted_date: null,
         updated_at: new Date().toISOString(),
       })
-      .or(`tts_quota_exhausted_date.lt.${today},flash_quota_exhausted_date.lt.${today}`)
+      .or(`tts_quota_exhausted_date.lt.${today},flash_2_5_quota_exhausted_date.lt.${today}`)
       .select("id");
 
     if (userKeysError) {
@@ -65,26 +64,15 @@ serve(async (req) => {
     const userKeysCount = userKeysReset?.length || 0;
     console.log(`Reset ${userKeysCount} user API key quotas`);
 
-    // Also reset admin API keys (api_keys table)
-    const { data: adminKeysReset, error: adminKeysError } = await serviceClient
-      .from("api_keys")
-      .update({
-        tts_quota_exhausted: false,
-        tts_quota_exhausted_date: null,
-        flash_quota_exhausted: false,
-        flash_quota_exhausted_date: null,
-        updated_at: new Date().toISOString(),
-      })
-      .or(`tts_quota_exhausted_date.lt.${today},flash_quota_exhausted_date.lt.${today}`)
-      .select("id");
+    // Reset admin API keys using the database function
+    const { error: adminKeysError } = await serviceClient.rpc('reset_api_key_model_quotas');
 
     if (adminKeysError) {
       console.error("Error resetting admin API keys:", adminKeysError);
       throw adminKeysError;
     }
 
-    const adminKeysCount = adminKeysReset?.length || 0;
-    console.log(`Reset ${adminKeysCount} admin API key quotas`);
+    console.log("Reset admin API key quotas via reset_api_key_model_quotas()");
 
     // Reset user daily credits (profiles.daily_credits_used)
     const { data: profilesReset, error: profilesError } = await serviceClient
@@ -111,7 +99,7 @@ serve(async (req) => {
       timestamp: new Date().toISOString(),
       stats: {
         userApiKeysReset: userKeysCount,
-        adminApiKeysReset: adminKeysCount,
+        adminApiKeysReset: "all (via RPC)",
         userProfilesReset: profilesCount,
       },
     };
