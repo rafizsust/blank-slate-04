@@ -978,6 +978,7 @@ export type Database = {
         Row: {
           completed_at: string | null
           created_at: string
+          current_part: number | null
           difficulty: string | null
           durations: Json | null
           file_paths: Json
@@ -989,14 +990,17 @@ export type Database = {
           lock_expires_at: string | null
           lock_token: string | null
           max_retries: number | null
+          partial_results: Json | null
           preset_id: string | null
           processing_started_at: string | null
+          progress: number | null
           result_id: string | null
           retry_count: number | null
           stage: string | null
           status: string
           test_id: string
           topic: string | null
+          total_parts: number | null
           updated_at: string
           upload_completed_at: string | null
           user_id: string
@@ -1004,6 +1008,7 @@ export type Database = {
         Insert: {
           completed_at?: string | null
           created_at?: string
+          current_part?: number | null
           difficulty?: string | null
           durations?: Json | null
           file_paths?: Json
@@ -1015,14 +1020,17 @@ export type Database = {
           lock_expires_at?: string | null
           lock_token?: string | null
           max_retries?: number | null
+          partial_results?: Json | null
           preset_id?: string | null
           processing_started_at?: string | null
+          progress?: number | null
           result_id?: string | null
           retry_count?: number | null
           stage?: string | null
           status?: string
           test_id: string
           topic?: string | null
+          total_parts?: number | null
           updated_at?: string
           upload_completed_at?: string | null
           user_id: string
@@ -1030,6 +1038,7 @@ export type Database = {
         Update: {
           completed_at?: string | null
           created_at?: string
+          current_part?: number | null
           difficulty?: string | null
           durations?: Json | null
           file_paths?: Json
@@ -1041,14 +1050,17 @@ export type Database = {
           lock_expires_at?: string | null
           lock_token?: string | null
           max_retries?: number | null
+          partial_results?: Json | null
           preset_id?: string | null
           processing_started_at?: string | null
+          progress?: number | null
           result_id?: string | null
           retry_count?: number | null
           stage?: string | null
           status?: string
           test_id?: string
           topic?: string | null
+          total_parts?: number | null
           updated_at?: string
           upload_completed_at?: string | null
           user_id?: string

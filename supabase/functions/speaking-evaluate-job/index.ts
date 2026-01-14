@@ -9,15 +9,15 @@ import {
 } from "../_shared/apiKeyQuotaUtils.ts";
 
 /**
- * Speaking Evaluate Job - Stage 2 of Speaking Evaluation
+ * Speaking Evaluate Job - OPTIMIZED VERSION
  * 
- * This function ONLY handles:
- * 1. Reading persisted Google File URIs from the database
- * 2. Calling Gemini for evaluation
- * 3. Saving results
+ * This function processes speaking evaluations in PARTS to avoid timeout:
+ * 1. Evaluate Part 1 (4-5 short questions) -> save partial results -> update progress (33%)
+ * 2. Evaluate Part 2 (1 long response) -> save partial results -> update progress (66%)
+ * 3. Evaluate Part 3 (3-4 discussion questions) -> combine all results -> complete (100%)
  * 
- * This assumes uploads are already done (idempotent stage 1).
- * Updates heartbeat during evaluation to prevent timeout detection.
+ * Each part is evaluated in a separate AI call, allowing the function to survive
+ * Supabase's edge function timeout limits.
  */
 
 const corsHeaders = {
@@ -27,9 +27,9 @@ const corsHeaders = {
 };
 
 const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-const HEARTBEAT_INTERVAL_MS = 20000; // 20 seconds for AI calls
-const LOCK_DURATION_MINUTES = 8; // Longer for AI evaluation
-const AI_CALL_TIMEOUT_MS = 180000; // 3 minutes per model call
+const HEARTBEAT_INTERVAL_MS = 15000; // 15 seconds
+const LOCK_DURATION_MINUTES = 5;
+const AI_CALL_TIMEOUT_MS = 90000; // 90 seconds per part (shorter since we're doing smaller chunks)
 
 class QuotaError extends Error {
   permanent: boolean;
@@ -46,7 +46,7 @@ function sleep(ms: number) {
 
 function exponentialBackoffWithJitter(attempt: number, baseMs: number, maxMs: number): number {
   const exponential = Math.min(baseMs * Math.pow(2, attempt), maxMs);
-  const jitter = Math.random() * exponential * 0.3; // 30% jitter
+  const jitter = Math.random() * exponential * 0.3;
   return Math.floor(exponential + jitter);
 }
 
@@ -110,58 +110,36 @@ serve(async (req) => {
     const lockToken = crypto.randomUUID();
     const lockExpiresAt = new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString();
 
-    // Try to claim the job with a lock - first fetch the job to check conditions
+    // Fetch job
     const { data: existingJob, error: fetchError } = await supabaseService
       .from('speaking_evaluation_jobs')
       .select('*')
       .eq('id', jobId)
       .maybeSingle();
 
-    if (fetchError) {
-      console.error(`[speaking-evaluate-job] Error fetching job ${jobId}:`, fetchError.message);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: `Failed to fetch job: ${fetchError.message}`,
-        skipped: true 
-      }), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-
-    if (!existingJob) {
+    if (fetchError || !existingJob) {
       console.log(`[speaking-evaluate-job] Job ${jobId} not found`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: 'Job not found',
-        skipped: true 
-      }), {
+      return new Response(JSON.stringify({ success: false, error: 'Job not found', skipped: true }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    // Check if job is in claimable state
+    // Check if job is claimable
     const isClaimableStatus = ['pending', 'processing'].includes(existingJob.status);
     const isClaimableStage = ['pending_eval', 'evaluating', null].includes(existingJob.stage);
     const lockExpired = !existingJob.lock_expires_at || new Date(existingJob.lock_expires_at) < new Date();
     const noLock = !existingJob.lock_token;
 
     if (!isClaimableStatus || !isClaimableStage || (!noLock && !lockExpired)) {
-      console.log(`[speaking-evaluate-job] Job ${jobId} not claimable: status=${existingJob.status}, stage=${existingJob.stage}, lockExpired=${lockExpired}, noLock=${noLock}`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: 'Job already claimed or in wrong state',
-        skipped: true,
-        currentStatus: existingJob.status,
-        currentStage: existingJob.stage,
-      }), {
+      console.log(`[speaking-evaluate-job] Job ${jobId} not claimable`);
+      return new Response(JSON.stringify({ success: false, error: 'Job already claimed or in wrong state', skipped: true }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    // Now claim the job with an update
+    // Claim the job
     const { data: updatedJobs, error: claimError } = await supabaseService
       .from('speaking_evaluation_jobs')
       .update({
@@ -170,45 +148,31 @@ serve(async (req) => {
         lock_token: lockToken,
         lock_expires_at: lockExpiresAt,
         heartbeat_at: new Date().toISOString(),
+        progress: existingJob.progress || 0,
+        current_part: existingJob.current_part || 0,
+        total_parts: 3,
         updated_at: new Date().toISOString(),
       })
       .eq('id', jobId)
       .select();
 
-    if (claimError) {
-      console.error(`[speaking-evaluate-job] Error claiming job ${jobId}:`, claimError.message);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: `Failed to claim job: ${claimError.message}`,
-        skipped: true 
-      }), {
+    if (claimError || !updatedJobs?.[0]) {
+      return new Response(JSON.stringify({ success: false, error: 'Failed to claim job', skipped: true }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    const job = updatedJobs?.[0];
-    if (!job) {
-      console.log(`[speaking-evaluate-job] No job returned after update for ${jobId}`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: 'Job claim failed - no data returned',
-        skipped: true 
-      }), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-
-    // Verify uploads exist
+    const job = updatedJobs[0];
     const googleFileUris = job.google_file_uris as Record<string, { fileUri: string; mimeType: string; index: number }>;
+    
     if (!googleFileUris || Object.keys(googleFileUris).length === 0) {
       throw new Error('No Google File URIs found - upload stage incomplete');
     }
 
     console.log(`[speaking-evaluate-job] Claimed job ${jobId}, ${Object.keys(googleFileUris).length} files ready`);
 
-    // Set up heartbeat updater
+    // Set up heartbeat
     heartbeatInterval = setInterval(async () => {
       try {
         await supabaseService
@@ -219,13 +183,15 @@ serve(async (req) => {
           })
           .eq('id', jobId)
           .eq('lock_token', lockToken);
-        console.log(`[speaking-evaluate-job] Heartbeat updated for ${jobId}`);
       } catch (e) {
         console.error(`[speaking-evaluate-job] Heartbeat failed:`, e);
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    const { user_id: userId, test_id, file_paths, durations, topic, difficulty, fluency_flag } = job;
+    const { user_id: userId, test_id, file_paths, durations, topic, difficulty, fluency_flag, partial_results: existingPartialResults } = job;
+    
+    // Get partial results from previous run (if any)
+    let partialResults = (existingPartialResults as Record<string, any>) || {};
 
     // Get test payload
     const { data: testRow } = await supabaseService
@@ -251,7 +217,7 @@ serve(async (req) => {
       }
     }
 
-    // Build segment metadata for prompt
+    // Build segment metadata
     const parts = Array.isArray(payload?.speakingParts) ? payload.speakingParts : [];
     const questionById = new Map<string, { partNumber: 1 | 2 | 3; questionNumber: number; questionText: string }>();
     
@@ -270,7 +236,10 @@ serve(async (req) => {
       }
     }
 
-    const orderedSegments: Array<{ segmentKey: string; partNumber: 1 | 2 | 3; questionNumber: number; questionText: string }> = [];
+    // Group segments by part
+    const segmentsByPart: Record<number, Array<{ segmentKey: string; partNumber: 1 | 2 | 3; questionNumber: number; questionText: string }>> = {
+      1: [], 2: [], 3: []
+    };
     
     for (const segmentKey of Object.keys(googleFileUris)) {
       const m = String(segmentKey).match(/^part([123])\-q(.+)$/);
@@ -278,7 +247,7 @@ serve(async (req) => {
       const questionId = m[2];
       const q = questionById.get(questionId);
       if (!q) continue;
-      orderedSegments.push({ 
+      segmentsByPart[q.partNumber].push({ 
         segmentKey, 
         partNumber: q.partNumber, 
         questionNumber: q.questionNumber,
@@ -286,19 +255,10 @@ serve(async (req) => {
       });
     }
 
-    orderedSegments.sort((a, b) => {
-      if (a.partNumber !== b.partNumber) return a.partNumber - b.partNumber;
-      return a.questionNumber - b.questionNumber;
-    });
-
-    // Build prompt
-    const prompt = buildPrompt(
-      payload, 
-      topic || testRow.topic, 
-      difficulty || testRow.difficulty, 
-      fluency_flag, 
-      orderedSegments
-    );
+    // Sort segments within each part
+    for (const partNum of [1, 2, 3]) {
+      segmentsByPart[partNum].sort((a, b) => a.questionNumber - b.questionNumber);
+    }
 
     // Build API key queue
     interface KeyCandidate { key: string; keyId: string | null; isUserProvided: boolean; }
@@ -328,133 +288,223 @@ serve(async (req) => {
     }
 
     if (keyQueue.length === 0) throw new Error('No API keys available');
-
     console.log(`[speaking-evaluate-job] Key queue: ${keyQueue.length} keys`);
 
-    // Build file URIs in order for Gemini
-    const sortedFileUris = orderedSegments.map(seg => {
-      const uri = googleFileUris[seg.segmentKey];
-      return { fileData: { mimeType: uri.mimeType, fileUri: uri.fileUri } };
+    // Determine which part to evaluate next
+    const currentPart = (job.current_part as number) || 0;
+    const partsToEvaluate = [1, 2, 3].filter(p => {
+      // Skip parts that are already done
+      if (partialResults[`part${p}`]) return false;
+      // Skip parts that have no segments
+      if (segmentsByPart[p].length === 0) return false;
+      return true;
     });
 
-    // Evaluation loop
-    let evaluationResult: any = null;
-    let usedModel: string | null = null;
+    console.log(`[speaking-evaluate-job] Parts to evaluate: ${partsToEvaluate.join(', ')}, already done: ${Object.keys(partialResults).join(', ')}`);
 
-    for (const candidateKey of keyQueue) {
-      if (evaluationResult) break;
-      
-      console.log(`[speaking-evaluate-job] Trying key ${candidateKey.isUserProvided ? '(user)' : `(admin: ${candidateKey.keyId})`}`);
+    // Process ONE part at a time (to avoid timeout)
+    const partToProcess = partsToEvaluate[0];
+    
+    if (partToProcess) {
+      const segments = segmentsByPart[partToProcess];
+      console.log(`[speaking-evaluate-job] Processing Part ${partToProcess} with ${segments.length} segments`);
 
-      try {
-        const genAI = new GoogleGenerativeAI(candidateKey.key);
+      // Update progress before starting
+      await supabaseService
+        .from('speaking_evaluation_jobs')
+        .update({ 
+          current_part: partToProcess,
+          progress: Math.round(((3 - partsToEvaluate.length) / 3) * 100),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('lock_token', lockToken);
 
-        for (const modelName of GEMINI_MODELS) {
-          if (evaluationResult) break;
+      // Build file URIs for this part
+      const partFileUris = segments.map(seg => {
+        const uri = googleFileUris[seg.segmentKey];
+        return { fileData: { mimeType: uri.mimeType, fileUri: uri.fileUri } };
+      });
 
-          console.log(`[speaking-evaluate-job] Attempting evaluation with model: ${modelName}`);
-          
-          const model = genAI.getGenerativeModel({ 
-            model: modelName,
-            generationConfig: { temperature: 0.3, maxOutputTokens: 50000 },
-          });
+      // Build part-specific prompt
+      const partPrompt = buildPartPrompt(partToProcess as 1 | 2 | 3, segments, topic || testRow.topic, difficulty || testRow.difficulty, fluency_flag && partToProcess === 2);
 
-          const contentParts: any[] = [
-            ...sortedFileUris,
-            { text: prompt }
-          ];
+      // Evaluate this part
+      let partResult: any = null;
 
-          const MAX_RETRIES = 3;
-          for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            try {
-              // Update heartbeat before long AI call
-              await supabaseService
-                .from('speaking_evaluation_jobs')
-                .update({ 
-                  heartbeat_at: new Date().toISOString(),
-                  lock_expires_at: new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString(),
-                })
-                .eq('id', jobId)
-                .eq('lock_token', lockToken);
+      for (const candidateKey of keyQueue) {
+        if (partResult) break;
+        
+        try {
+          const genAI = new GoogleGenerativeAI(candidateKey.key);
 
-              // Wrap the Gemini call in a timeout to prevent hanging forever
-              const response = await withTimeout(
-                model.generateContent({ contents: [{ role: 'user', parts: contentParts }] }),
-                AI_CALL_TIMEOUT_MS,
-                `Gemini ${modelName} call`
-              );
-              const text = response.response?.text?.() || '';
+          for (const modelName of GEMINI_MODELS) {
+            if (partResult) break;
 
-              if (!text) {
-                console.warn(`[speaking-evaluate-job] Empty response from ${modelName}`);
-                break;
-              }
+            console.log(`[speaking-evaluate-job] Part ${partToProcess}: trying ${modelName}`);
+            
+            const model = genAI.getGenerativeModel({ 
+              model: modelName,
+              generationConfig: { temperature: 0.3, maxOutputTokens: 20000 },
+            });
 
-              const parsed = parseJson(text);
-              if (parsed) {
-                // Apply sanitization to filter out hallucinated lexical items
-                evaluationResult = sanitizeEvaluation(parsed);
-                usedModel = modelName;
-                console.log(`[speaking-evaluate-job] Success with ${modelName}`);
-                break;
-              } else {
-                console.warn(`[speaking-evaluate-job] Failed to parse JSON from ${modelName}`);
-                break;
-              }
-            } catch (err: any) {
-              const errMsg = String(err?.message || '');
-              console.error(`[speaking-evaluate-job] ${modelName} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
+            const contentParts: any[] = [...partFileUris, { text: partPrompt }];
 
-              if (isPermanentQuotaExhausted(err)) {
-                if (!candidateKey.isUserProvided && candidateKey.keyId) {
-                  await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash_2_5');
+            const MAX_RETRIES = 2;
+            for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+              try {
+                // Update heartbeat
+                await supabaseService
+                  .from('speaking_evaluation_jobs')
+                  .update({ 
+                    heartbeat_at: new Date().toISOString(),
+                    lock_expires_at: new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString(),
+                  })
+                  .eq('id', jobId)
+                  .eq('lock_token', lockToken);
+
+                const response = await withTimeout(
+                  model.generateContent({ contents: [{ role: 'user', parts: contentParts }] }),
+                  AI_CALL_TIMEOUT_MS,
+                  `Gemini ${modelName} Part ${partToProcess}`
+                );
+                const text = response.response?.text?.() || '';
+
+                if (!text) {
+                  console.warn(`[speaking-evaluate-job] Empty response from ${modelName}`);
+                  break;
                 }
-                throw new QuotaError(errMsg, { permanent: true });
-              }
 
-              if (isQuotaExhaustedError(errMsg)) {
-                const retryAfter = extractRetryAfterSeconds(err);
+                const parsed = parseJson(text);
+                if (parsed) {
+                  partResult = parsed;
+                  console.log(`[speaking-evaluate-job] Part ${partToProcess} success with ${modelName}`);
+                  break;
+                } else {
+                  console.warn(`[speaking-evaluate-job] Failed to parse JSON from ${modelName}`);
+                  break;
+                }
+              } catch (err: any) {
+                const errMsg = String(err?.message || '');
+                console.error(`[speaking-evaluate-job] ${modelName} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
+
+                if (isPermanentQuotaExhausted(err)) {
+                  if (!candidateKey.isUserProvided && candidateKey.keyId) {
+                    await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash_2_5');
+                  }
+                  throw new QuotaError(errMsg, { permanent: true });
+                }
+
+                if (isQuotaExhaustedError(errMsg)) {
+                  const retryAfter = extractRetryAfterSeconds(err);
+                  if (attempt < MAX_RETRIES - 1) {
+                    const delay = retryAfter ? Math.min(retryAfter * 1000, 30000) : exponentialBackoffWithJitter(attempt, 2000, 30000);
+                    console.log(`[speaking-evaluate-job] Rate limited, retrying in ${Math.round(delay / 1000)}s...`);
+                    await sleep(delay);
+                    continue;
+                  } else {
+                    throw new QuotaError(errMsg, { permanent: false });
+                  }
+                }
+
                 if (attempt < MAX_RETRIES - 1) {
-                  const delay = retryAfter ? Math.min(retryAfter * 1000, 45000) : exponentialBackoffWithJitter(attempt, 2000, 45000);
-                  console.log(`[speaking-evaluate-job] Rate limited, retrying in ${Math.round(delay / 1000)}s...`);
+                  const delay = exponentialBackoffWithJitter(attempt, 1000, 15000);
                   await sleep(delay);
                   continue;
-                } else {
-                  throw new QuotaError(errMsg, { permanent: false });
                 }
+                break;
               }
-
-              if (attempt < MAX_RETRIES - 1) {
-                const delay = exponentialBackoffWithJitter(attempt, 1000, 20000);
-                console.log(`[speaking-evaluate-job] Transient error, retrying in ${Math.round(delay / 1000)}s...`);
-                await sleep(delay);
-                continue;
-              }
-              break;
             }
           }
+        } catch (keyError: any) {
+          if (keyError instanceof QuotaError) {
+            console.log(`[speaking-evaluate-job] Key quota exhausted, trying next...`);
+            continue;
+          }
+          console.error(`[speaking-evaluate-job] Key error:`, keyError?.message);
         }
-      } catch (keyError: any) {
-        if (keyError instanceof QuotaError) {
-          console.log(`[speaking-evaluate-job] Key quota exhausted, trying next...`);
-          continue;
-        }
-        console.error(`[speaking-evaluate-job] Key error:`, keyError?.message);
       }
+
+      if (!partResult) {
+        throw new Error(`Part ${partToProcess} evaluation failed: all models/keys exhausted`);
+      }
+
+      // Save partial result
+      partialResults[`part${partToProcess}`] = partResult;
+      
+      const newProgress = Math.round(((3 - partsToEvaluate.length + 1) / 3) * 100);
+      
+      await supabaseService
+        .from('speaking_evaluation_jobs')
+        .update({ 
+          partial_results: partialResults,
+          progress: newProgress,
+          current_part: partToProcess,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('lock_token', lockToken);
+
+      console.log(`[speaking-evaluate-job] Part ${partToProcess} saved, progress: ${newProgress}%`);
     }
 
-    // Clear heartbeat interval
+    // Clear heartbeat
     if (heartbeatInterval) {
       clearInterval(heartbeatInterval);
       heartbeatInterval = null;
     }
 
-    if (!evaluationResult) {
-      throw new Error('Evaluation failed: all models/keys exhausted');
+    // Check if all parts are done
+    const remainingParts = [1, 2, 3].filter(p => {
+      if (partialResults[`part${p}`]) return false;
+      if (segmentsByPart[p].length === 0) return false;
+      return true;
+    });
+
+    if (remainingParts.length > 0) {
+      // More parts to process - release lock and let job runner pick it up again
+      console.log(`[speaking-evaluate-job] ${remainingParts.length} parts remaining, releasing for next iteration`);
+      
+      await supabaseService
+        .from('speaking_evaluation_jobs')
+        .update({
+          status: 'pending',
+          stage: 'pending_eval',
+          partial_results: partialResults,
+          lock_token: null,
+          lock_expires_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', jobId);
+
+      // Immediately trigger next iteration
+      const functionUrl = `${supabaseUrl}/functions/v1/speaking-evaluate-job`;
+      fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseServiceKey}`,
+        },
+        body: JSON.stringify({ jobId }),
+      }).catch(e => console.warn('Failed to trigger next iteration:', e));
+
+      return new Response(JSON.stringify({ 
+        success: true, 
+        status: 'partial',
+        progress: Math.round(((3 - remainingParts.length) / 3) * 100),
+        remainingParts,
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    // Calculate band score
-    const overallBand = evaluationResult.overall_band || calculateBand(evaluationResult);
+    // ALL PARTS COMPLETE - Aggregate and save final result
+    console.log(`[speaking-evaluate-job] All parts complete, aggregating results`);
+
+    const allSegments = [...segmentsByPart[1], ...segmentsByPart[2], ...segmentsByPart[3]];
+    const finalResult = aggregatePartResults(partialResults, allSegments);
+    const overallBand = finalResult.overall_band || calculateBand(finalResult);
 
     // Build public audio URLs
     const publicBase = (Deno.env.get('R2_PUBLIC_URL') || '').replace(/\/$/, '');
@@ -475,13 +525,13 @@ serve(async (req) => {
         module: 'speaking',
         score: Math.round(overallBand * 10),
         band_score: overallBand,
-        total_questions: orderedSegments.length,
+        total_questions: allSegments.length,
         time_spent_seconds: durations ? Math.round(Object.values(durations as Record<string, number>).reduce((a: number, b: number) => a + b, 0)) : 60,
-        question_results: evaluationResult,
+        question_results: finalResult,
         answers: {
           audio_urls: audioUrls,
-          transcripts_by_part: evaluationResult?.transcripts_by_part || {},
-          transcripts_by_question: evaluationResult?.transcripts_by_question || {},
+          transcripts_by_part: finalResult?.transcripts_by_part || {},
+          transcripts_by_question: finalResult?.transcripts_by_question || {},
           file_paths: filePathsMap,
         },
         completed_at: new Date().toISOString(),
@@ -498,6 +548,7 @@ serve(async (req) => {
         status: 'completed',
         stage: 'completed',
         result_id: resultRow?.id,
+        progress: 100,
         completed_at: new Date().toISOString(),
         lock_token: null,
         lock_expires_at: null,
@@ -520,21 +571,19 @@ serve(async (req) => {
   } catch (error: any) {
     console.error('[speaking-evaluate-job] Error:', error);
 
-    // Clear heartbeat interval on error
     if (heartbeatInterval) {
       clearInterval(heartbeatInterval);
     }
 
-    // Update job with error
     if (jobId) {
       const { data: currentJob } = await supabaseService
         .from('speaking_evaluation_jobs')
-        .select('retry_count, max_retries')
+        .select('retry_count, max_retries, partial_results')
         .eq('id', jobId)
         .maybeSingle();
 
       const retryCount = (currentJob?.retry_count || 0) + 1;
-      const maxRetries = currentJob?.max_retries || 3;
+      const maxRetries = currentJob?.max_retries || 5;
 
       if (retryCount >= maxRetries) {
         await supabaseService
@@ -555,7 +604,7 @@ serve(async (req) => {
           .update({
             status: 'pending',
             stage: 'pending_eval',
-            last_error: `Evaluation error (will retry): ${error.message}`,
+            last_error: `Retry ${retryCount}/${maxRetries}: ${error.message}`,
             retry_count: retryCount,
             lock_token: null,
             lock_expires_at: null,
@@ -582,210 +631,205 @@ async function decryptKey(encrypted: string, appKey: string): Promise<string> {
   return decoder.decode(decrypted);
 }
 
-function buildPrompt(
-  payload: any,
+function buildPartPrompt(
+  partNumber: 1 | 2 | 3,
+  segments: Array<{ segmentKey: string; partNumber: number; questionNumber: number; questionText: string }>,
   topic: string | undefined,
   difficulty: string | undefined,
-  fluencyFlag: boolean | undefined,
-  orderedSegments: Array<{ segmentKey: string; partNumber: 1 | 2 | 3; questionNumber: number; questionText: string }>,
+  fluencyPenalty: boolean | undefined,
 ): string {
-  const parts = Array.isArray(payload?.speakingParts) ? payload.speakingParts : [];
-  const questions = parts
-    .flatMap((p: any) =>
-      (Array.isArray(p?.questions)
-        ? p.questions.map((q: any) => ({
-            id: String(q?.id || ''),
-            part_number: Number(p?.part_number),
-            question_number: Number(q?.question_number),
-            question_text: String(q?.question_text || ''),
-          }))
-        : []),
-    )
-    .filter((q: any) => q.part_number === 1 || q.part_number === 2 || q.part_number === 3);
-
-  const numQ = orderedSegments.length;
+  const numQ = segments.length;
   
-  const audioMappingLines = orderedSegments.map((seg, idx) => 
-    `AUDIO_${idx}: "${seg.segmentKey}" → Part ${seg.partNumber}, Question ${seg.questionNumber}: "${seg.questionText}"`
+  const audioMappingLines = segments.map((seg, idx) => 
+    `AUDIO_${idx}: "${seg.segmentKey}" → Question ${seg.questionNumber}: "${seg.questionText}"`
   ).join('\n');
 
-  return `You are a CERTIFIED SENIOR IELTS Speaking Examiner with 20+ years of experience.
-Evaluate exactly as an official IELTS examiner. Return ONLY valid JSON.
+  const partDescriptions: Record<number, string> = {
+    1: 'Part 1: Introduction and familiar topics (30-60 words expected per answer)',
+    2: 'Part 2: Individual long turn with cue card (150-250 words expected)',
+    3: 'Part 3: Two-way discussion with abstract topics (40-80 words expected per answer)',
+  };
 
-CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}, Questions: ${numQ}
-${fluencyFlag ? '⚠️ Part 2 speaking time under 80 seconds - apply fluency penalty.' : ''}
+  return `You are a CERTIFIED SENIOR IELTS Speaking Examiner evaluating ${partDescriptions[partNumber]}.
+Return ONLY valid JSON.
+
+CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}
+${fluencyPenalty ? '⚠️ Speaking time under 80 seconds - apply fluency penalty.' : ''}
 
 ══════════════════════════════════════════════════════════════
-🚨🚨🚨 CRITICAL TRANSCRIPTION RULES - READ CAREFULLY 🚨🚨🚨
+🚨 CRITICAL TRANSCRIPTION RULES 🚨
 ══════════════════════════════════════════════════════════════
 
-**ZERO HALLUCINATION POLICY**: You MUST transcribe ONLY what the candidate ACTUALLY SAID in each audio file.
+**ZERO HALLUCINATION POLICY**: Transcribe ONLY what the candidate ACTUALLY SAID.
 
-🚫 ABSOLUTELY FORBIDDEN:
-- DO NOT invent, fabricate, or guess what the candidate might have said
-- DO NOT create plausible answers based on the question context
-- DO NOT fill in gaps with assumed content
+🚫 FORBIDDEN:
+- DO NOT invent or fabricate content
+- DO NOT create plausible answers based on context
 - DO NOT paraphrase or improve what was said
-- DO NOT generate example answers if you cannot hear the audio
 
-✅ YOU MUST:
-- Transcribe the EXACT words spoken in each audio file, word-for-word
-- Include ALL filler words: "uh", "um", "like", "you know", "so", etc.
-- Include false starts, repetitions, and self-corrections
-- If a candidate says "Question one" or "Question two", write EXACTLY that
-- If the audio is unclear, write "[INAUDIBLE]" for unclear portions
-- If there is silence or no speech, write "[NO SPEECH DETECTED]"
-- If the audio is too short/empty, write "[AUDIO TOO SHORT - NO CONTENT]"
-
-VERIFICATION CHECK: Before submitting, ask yourself for EACH transcript:
-"Did I hear these exact words in the audio, or did I make this up?"
-If you made it up, you have FAILED and must fix it.
+✅ REQUIRED:
+- Transcribe EXACT words spoken, word-for-word
+- Include ALL filler words: "uh", "um", "like", "you know"
+- Include false starts, repetitions, self-corrections
+- Write "[INAUDIBLE]" for unclear portions
+- Write "[NO SPEECH]" if silence
 
 ══════════════════════════════════════════════════════════════
-AUDIO-TO-QUESTION MAPPING (FIXED ORDER)
+AUDIO-TO-QUESTION MAPPING
 ══════════════════════════════════════════════════════════════
-The ${numQ} audio files are provided in this EXACT fixed order:
+${numQ} audio file(s) in order:
 
 ${audioMappingLines}
 
-RULES:
-1. Audio file at position 0 = AUDIO_0 = first segment in the list above
-2. Audio file at position 1 = AUDIO_1 = second segment in the list above
-3. Continue this pattern for ALL files
-4. DO NOT reorder or swap. The mapping is FIXED.
-
 ══════════════════════════════════════════════════════════════
-SCORING FOR POOR/OFF-TOPIC RESPONSES (STRICTLY ENFORCE)
+SCORING GUIDELINES
 ══════════════════════════════════════════════════════════════
 
-The candidate may give completely off-topic or inadequate responses. Score them HARSHLY:
-
-🔴 UNACCEPTABLE RESPONSES - Band 1.0-2.0:
-- Candidate just says "Question one", "Question two", or the question number
-- No actual answer to the question
-- Complete silence or unintelligible mumbling
-- Less than 5 words total with no meaningful content
-
-🟠 VERY POOR RESPONSES - Band 2.5-3.5:
-- Only 5-10 words with minimal relevance
-- Generic one-liner that doesn't address the question
-- "I don't know" type responses
-
-🟡 POOR RESPONSES - Band 4.0-4.5:
-- 10-20 words with some attempt at answering
-- Limited vocabulary, basic grammar only
-- Significant hesitation and repetition
-
-📊 WORD COUNT GUIDELINES (MANDATORY):
-- Part 1: Expect 30-60 words per answer for Band 5-6
-- Part 2: Expect 150-250 words for Band 5-6
-- Part 3: Expect 40-80 words per answer for Band 5-6
-
-If response is significantly shorter, cap the band score accordingly.
+🔴 Band 1-2: Just says question number, no actual answer, <5 words
+🟠 Band 2.5-3.5: 5-10 words, minimal relevance
+🟡 Band 4-4.5: 10-20 words, limited vocabulary
+🟢 Band 5-6: Adequate response length with some development
+🔵 Band 7+: Full, fluent, well-developed responses
 
 ══════════════════════════════════════════════════════════════
-OFFICIAL IELTS BAND DESCRIPTORS
-══════════════════════════════════════════════════════════════
-
-FLUENCY AND COHERENCE (FC):
-- Band 9: Speaks fluently with rare hesitation; hesitation is content-related
-- Band 7: Speaks at length without noticeable effort; some language-related hesitation
-- Band 5: Maintains flow with repetition/self-correction/slow speech
-- Band 4: Cannot respond without noticeable pauses; frequent repetition
-- Band 3: Pauses occur frequently; simple connectives only
-- Band 2: Speech is very slow and fragmented; minimal communication
-
-LEXICAL RESOURCE (LR):
-- Band 9: Full flexibility; idiomatic language naturally
-- Band 7: Flexible vocabulary; some less common/idiomatic vocabulary
-- Band 5: Limited vocabulary; pauses to search for words
-- Band 4: Basic vocabulary, repetitive or inappropriate
-- Band 3: Simple vocabulary; meaning unclear at times
-- Band 2: Only isolated words or memorized utterances
-
-GRAMMATICAL RANGE AND ACCURACY (GRA):
-- Band 9: Full range of structures; consistently accurate
-- Band 7: Range of complex structures; frequently error-free
-- Band 5: Basic sentence forms; limited complex structures
-- Band 4: Basic sentences; subordinate structures rare
-- Band 3: Attempts basic sentence forms; errors common
-- Band 2: Cannot produce basic sentence forms
-
-PRONUNCIATION (P):
-- Band 9: Full range of features with precision
-- Band 7: Most features of Band 8; some L1 influence
-- Band 5: Some Band 6 features; mispronounces individual words
-- Band 4: Limited features; frequent mispronunciations
-- Band 3: Very limited control; frequent misunderstandings
-- Band 2: Pronunciation makes comprehension very difficult
-
-══════════════════════════════════════════════════════════════
-MODEL ANSWERS REQUIREMENTS (MANDATORY)
-══════════════════════════════════════════════════════════════
-
-For EACH question, you MUST provide a modelAnswer showing how a Band 7-8 candidate would respond.
-
-Word count requirements for model answers:
-- Part 1: ~75 words (natural, conversational)
-- Part 2: ~250-300 words (covers all cue card points)
-- Part 3: ~120-150 words (analytical with examples)
-
-Each modelAnswer MUST include:
-- estimatedBand: The candidate's actual band for THIS question
-- targetBand: One band higher (or 8.5 if already high)
-- modelAnswer: A complete Band 7-8 response demonstrating ideal techniques
-- whyItWorks: 3-4 specific reasons this answer would score well
-- keyImprovements: 3-4 specific things the candidate should improve
-
-══════════════════════════════════════════════════════════════
-EXACT JSON OUTPUT SCHEMA (FOLLOW PRECISELY)
+OUTPUT JSON SCHEMA
 ══════════════════════════════════════════════════════════════
 {
-  "overall_band": 6.0,
+  "part_number": ${partNumber},
   "criteria": {
-    "fluency_coherence": {"band": 6.0, "feedback": "Specific assessment of this criterion", "strengths": ["str1", "str2"], "weaknesses": ["weak1"], "suggestions": ["tip1", "tip2"]},
+    "fluency_coherence": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "lexical_resource": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "grammatical_range": {"band": 5.5, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "pronunciation": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]}
   },
-  "summary": "2-4 sentence overall performance summary",
-  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example usage"}],
-  "part_analysis": [
-    {"part_number": 1, "performance_notes": "How the candidate performed in Part 1...", "key_moments": ["Notable strength or issue 1", "Notable moment 2"], "areas_for_improvement": ["Improvement 1", "Improvement 2"]}
+  "part_summary": "2-3 sentences summarizing Part ${partNumber} performance",
+  "transcripts": [
+    {"segment_key": "...", "question_number": 1, "question_text": "...", "transcript": "EXACT words spoken"}
   ],
-  "improvement_priorities": ["Priority 1: Most important thing to work on", "Priority 2: Second priority"],
-  "strengths_to_maintain": ["Strength 1: Something they did well", "Strength 2: Another positive"],
-  "transcripts_by_part": {"1": "Full concatenated Part 1 transcript...", "2": "...", "3": "..."},
-  "transcripts_by_question": {
-    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "EXACT words spoken by candidate"}],
-    "2": [...],
-    "3": [...]
-  },
   "modelAnswers": [
     {
-      "segment_key": "MUST match segment_key from audio mapping above",
-      "partNumber": 1,
+      "segment_key": "...",
+      "partNumber": ${partNumber},
       "questionNumber": 1,
-      "question": "The question text",
-      "candidateResponse": "EXACT transcript from the audio - NO FABRICATION",
+      "question": "...",
+      "candidateResponse": "EXACT transcript",
       "estimatedBand": 5.5,
       "targetBand": 6.5,
-      "modelAnswer": "A complete ~75 word (Part 1) / ~300 word (Part 2) / ~150 word (Part 3) model response...",
-      "whyItWorks": ["Uses topic vocabulary", "Clear structure", "Natural examples"],
-      "keyImprovements": ["Add more detail", "Vary vocabulary", "Use complex sentences"]
+      "modelAnswer": "Band 7-8 model response...",
+      "whyItWorks": ["reason1", "reason2"],
+      "keyImprovements": ["improvement1", "improvement2"]
     }
-  ]
+  ],
+  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "..."}]
 }
 
-QUESTIONS JSON: ${JSON.stringify(questions)}
+Return EXACTLY ${numQ} transcripts and ${numQ} modelAnswers.`;
+}
 
-FINAL REMINDER:
-1. There are exactly ${numQ} audio files - return exactly ${numQ} modelAnswers
-2. segment_key in each modelAnswer MUST match the AUDIO_0 to AUDIO_${numQ - 1} mapping
-3. candidateResponse MUST be the EXACT words heard in the audio - NEVER fabricate
-4. If the candidate said something irrelevant like "Question one" - transcribe it and score Band 1-2
-5. Model answers MUST be substantial (75/300/150 words per part)
-6. part_analysis MUST have entries for each part with real performance notes`;
+function aggregatePartResults(
+  partialResults: Record<string, any>,
+  allSegments: Array<{ segmentKey: string; partNumber: number; questionNumber: number; questionText: string }>,
+): any {
+  const part1 = partialResults.part1 || {};
+  const part2 = partialResults.part2 || {};
+  const part3 = partialResults.part3 || {};
+
+  // Aggregate criteria scores (average across parts that have them)
+  const aggregateCriteria = (criterion: string) => {
+    const scores: number[] = [];
+    const feedbacks: string[] = [];
+    const allStrengths: string[] = [];
+    const allWeaknesses: string[] = [];
+    const allSuggestions: string[] = [];
+
+    for (const part of [part1, part2, part3]) {
+      const c = part?.criteria?.[criterion];
+      if (c?.band !== undefined) {
+        scores.push(c.band);
+        if (c.feedback) feedbacks.push(c.feedback);
+        if (Array.isArray(c.strengths)) allStrengths.push(...c.strengths);
+        if (Array.isArray(c.weaknesses)) allWeaknesses.push(...c.weaknesses);
+        if (Array.isArray(c.suggestions)) allSuggestions.push(...c.suggestions);
+      }
+    }
+
+    if (scores.length === 0) return { band: 5.5, feedback: '', strengths: [], weaknesses: [], suggestions: [] };
+
+    return {
+      band: Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 2) / 2,
+      feedback: feedbacks.join(' '),
+      strengths: [...new Set(allStrengths)].slice(0, 4),
+      weaknesses: [...new Set(allWeaknesses)].slice(0, 4),
+      suggestions: [...new Set(allSuggestions)].slice(0, 4),
+    };
+  };
+
+  const criteria = {
+    fluency_coherence: aggregateCriteria('fluency_coherence'),
+    lexical_resource: aggregateCriteria('lexical_resource'),
+    grammatical_range: aggregateCriteria('grammatical_range'),
+    pronunciation: aggregateCriteria('pronunciation'),
+  };
+
+  // Aggregate transcripts
+  const transcripts_by_part: Record<string, string> = {};
+  const transcripts_by_question: Record<string, any[]> = { '1': [], '2': [], '3': [] };
+  
+  for (const [partKey, partData] of Object.entries({ part1, part2, part3 })) {
+    const partNum = partKey.replace('part', '');
+    if (Array.isArray(partData?.transcripts)) {
+      transcripts_by_question[partNum] = partData.transcripts;
+      transcripts_by_part[partNum] = partData.transcripts.map((t: any) => t.transcript || '').join(' ');
+    }
+  }
+
+  // Aggregate model answers
+  const modelAnswers: any[] = [];
+  for (const part of [part1, part2, part3]) {
+    if (Array.isArray(part?.modelAnswers)) {
+      modelAnswers.push(...part.modelAnswers);
+    }
+  }
+
+  // Aggregate lexical upgrades
+  const lexical_upgrades: any[] = [];
+  for (const part of [part1, part2, part3]) {
+    if (Array.isArray(part?.lexical_upgrades)) {
+      lexical_upgrades.push(...part.lexical_upgrades);
+    }
+  }
+
+  // Build summary
+  const partSummaries: string[] = [];
+  if (part1.part_summary) partSummaries.push(`Part 1: ${part1.part_summary}`);
+  if (part2.part_summary) partSummaries.push(`Part 2: ${part2.part_summary}`);
+  if (part3.part_summary) partSummaries.push(`Part 3: ${part3.part_summary}`);
+
+  // Calculate overall band
+  const criteriaScores = [
+    criteria.fluency_coherence.band,
+    criteria.lexical_resource.band,
+    criteria.grammatical_range.band,
+    criteria.pronunciation.band,
+  ];
+  const overallBand = Math.round((criteriaScores.reduce((a, b) => a + b, 0) / 4) * 2) / 2;
+
+  return {
+    overall_band: overallBand,
+    criteria,
+    summary: partSummaries.join(' ') || 'Evaluation complete.',
+    transcripts_by_part,
+    transcripts_by_question,
+    modelAnswers,
+    lexical_upgrades: [...new Set(lexical_upgrades.map(l => JSON.stringify(l)))].map(s => JSON.parse(s)).slice(0, 10),
+    part_analysis: [
+      { part_number: 1, performance_notes: part1.part_summary || '', key_moments: [], areas_for_improvement: [] },
+      { part_number: 2, performance_notes: part2.part_summary || '', key_moments: [], areas_for_improvement: [] },
+      { part_number: 3, performance_notes: part3.part_summary || '', key_moments: [], areas_for_improvement: [] },
+    ].filter(p => p.performance_notes),
+    improvement_priorities: [],
+    strengths_to_maintain: [],
+  };
 }
 
 function parseJson(text: string): any {
@@ -793,65 +837,10 @@ function parseJson(text: string): any {
     return JSON.parse(text);
   } catch {}
   const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (match)
-    try {
-      return JSON.parse(match[1].trim());
-    } catch {}
+  if (match) try { return JSON.parse(match[1].trim()); } catch {}
   const objMatch = text.match(/\{[\s\S]*\}/);
-  if (objMatch)
-    try {
-      return JSON.parse(objMatch[0]);
-    } catch {}
+  if (objMatch) try { return JSON.parse(objMatch[0]); } catch {}
   return null;
-}
-
-function sanitizeEvaluation(result: any): any {
-  if (!result || typeof result !== 'object') return result;
-
-  const transcriptText = getAllTranscriptText(result);
-  const transcriptLc = transcriptText.toLowerCase();
-
-  // Remove lexical suggestions that are not literally present in the candidate transcript.
-  if (Array.isArray(result.lexical_upgrades)) {
-    result.lexical_upgrades = result.lexical_upgrades.filter((row: any) => {
-      const original = String(row?.original || '').trim();
-      if (!original) return false;
-      // Allow multi-word matches; basic substring is enough for our use-case.
-      return transcriptLc.includes(original.toLowerCase());
-    });
-  }
-
-  // If almost no speech, don't show hallucinated lexical upgrades at all.
-  const wordCount = transcriptText.split(/\s+/).filter(Boolean).length;
-  if (wordCount < 8) {
-    result.lexical_upgrades = [];
-  }
-
-  return result;
-}
-
-function getAllTranscriptText(result: any): string {
-  const chunks: string[] = [];
-  const byPart = result?.transcripts_by_part;
-  if (byPart && typeof byPart === 'object') {
-    for (const v of Object.values(byPart)) chunks.push(String(v || ''));
-  }
-  const byQ = result?.transcripts_by_question;
-  if (byQ && typeof byQ === 'object') {
-    for (const partArr of Object.values(byQ)) {
-      if (!Array.isArray(partArr)) continue;
-      for (const row of partArr) {
-        chunks.push(String((row as any)?.transcript || ''));
-      }
-    }
-  }
-  // Some older shapes store candidateResponse in modelAnswers
-  if (Array.isArray(result?.modelAnswers)) {
-    for (const ma of result.modelAnswers) {
-      chunks.push(String((ma as any)?.candidateResponse || ''));
-    }
-  }
-  return chunks.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function calculateBand(result: any): number {

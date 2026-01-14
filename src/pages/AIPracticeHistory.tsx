@@ -44,6 +44,9 @@ interface PendingEvaluation {
   last_error?: string | null;
   retry_count?: number;
   max_retries?: number;
+  progress?: number;
+  current_part?: number;
+  total_parts?: number;
 }
 
 const MAX_RETRIES = 5; // Must match edge function
@@ -214,7 +217,7 @@ export default function AIPracticeHistory() {
       // and exclude cancelled jobs
       const { data: jobs } = await supabase
         .from('speaking_evaluation_jobs')
-        .select('id, test_id, status, created_at, updated_at, last_error, retry_count, max_retries')
+        .select('id, test_id, status, created_at, updated_at, last_error, retry_count, max_retries, progress, current_part, total_parts')
         .eq('user_id', user.id)
         .in('status', ['pending', 'processing'])
         .order('created_at', { ascending: false });
@@ -633,7 +636,9 @@ export default function AIPracticeHistory() {
                             {isPendingEval && pendingJob && ['pending', 'processing'].includes(pendingJob.status) && (
                               <Badge variant="outline" className="gap-1 text-xs border-primary/50 text-primary">
                                 <Loader2 className="w-3 h-3 animate-spin" />
-                                {pendingJob.status === 'processing' ? 'Evaluating...' : 'Queued'}
+                                {pendingJob.status === 'processing' 
+                                  ? `Evaluating${pendingJob.progress ? ` (${pendingJob.progress}%)` : ''}${pendingJob.current_part ? ` Part ${pendingJob.current_part}/3` : '...'}`
+                                  : 'Queued'}
                               </Badge>
                             )}
                             {isPendingEval && pendingJob?.status === 'retrying' && (
@@ -667,6 +672,18 @@ export default function AIPracticeHistory() {
                               </Badge>
                             )}
                           </div>
+                          
+                          {/* Progress bar for evaluating jobs */}
+                          {isPendingEval && pendingJob && pendingJob.status === 'processing' && pendingJob.progress !== undefined && pendingJob.progress > 0 && (
+                            <div className="mt-2 mb-1">
+                              <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                                <div 
+                                  className="h-full bg-primary transition-all duration-500 ease-out"
+                                  style={{ width: `${pendingJob.progress}%` }}
+                                />
+                              </div>
+                            </div>
+                          )}
                           
                           <p className="text-sm text-muted-foreground mb-2 line-clamp-1">
                             {test.topic}
