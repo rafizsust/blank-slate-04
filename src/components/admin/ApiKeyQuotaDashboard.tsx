@@ -11,11 +11,6 @@ import {
   XCircle,
   AlertTriangle,
   Zap,
-  Brain,
-  MessageSquare,
-  PenTool,
-  Mic,
-  Volume2
 } from 'lucide-react';
 import {
   Table,
@@ -31,76 +26,68 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 
+// Per-model quota tracking - actual Gemini model names
+interface ModelConfig {
+  id: string;           // Database column prefix
+  displayName: string;  // Display name in UI
+  description: string;  // What this model is used for
+  apiName: string;      // Actual API model name
+}
+
+// All models tracked in the system
+const GEMINI_MODELS: ModelConfig[] = [
+  {
+    id: 'gemini_2_0_flash',
+    displayName: '2.0 Flash',
+    description: 'Speaking evaluation primary',
+    apiName: 'gemini-2.0-flash',
+  },
+  {
+    id: 'gemini_2_0_flash_lite',
+    displayName: '2.0 Flash Lite',
+    description: 'Answer explanations, fast tasks',
+    apiName: 'gemini-2.0-flash-lite',
+  },
+  {
+    id: 'gemini_2_5_flash',
+    displayName: '2.5 Flash',
+    description: 'Speaking/writing evaluation backup',
+    apiName: 'gemini-2.5-flash',
+  },
+  {
+    id: 'gemini_2_5_flash_tts',
+    displayName: '2.5 Flash TTS',
+    description: 'Text-to-speech audio generation',
+    apiName: 'gemini-2.5-flash-preview-tts',
+  },
+  {
+    id: 'gemini_2_5_pro',
+    displayName: '2.5 Pro',
+    description: 'Writing evaluation backup',
+    apiName: 'gemini-2.5-pro',
+  },
+  {
+    id: 'gemini_3_pro',
+    displayName: '3 Pro',
+    description: 'Writing evaluation primary',
+    apiName: 'gemini-3-pro-preview',
+  },
+  {
+    id: 'gemini_exp_1206',
+    displayName: 'Exp 1206',
+    description: 'Test generation, complex tasks',
+    apiName: 'gemini-exp-1206',
+  },
+];
+
 interface ApiKeyWithQuotas {
   id: string;
   key_value: string;
   is_active: boolean;
   created_at: string;
-  tts_quota_exhausted: boolean | null;
-  tts_quota_exhausted_date: string | null;
-  flash_2_5_quota_exhausted: boolean | null;
-  flash_2_5_quota_exhausted_date: string | null;
-  flash_lite_quota_exhausted: boolean | null;
-  flash_lite_quota_exhausted_date: string | null;
-  pro_3_0_quota_exhausted: boolean | null;
-  pro_3_0_quota_exhausted_date: string | null;
-  exp_pro_quota_exhausted: boolean | null;
-  exp_pro_quota_exhausted_date: string | null;
+  // Per-model quota fields (dynamic)
+  [key: string]: any;
 }
-
-type QuotaType = 'tts' | 'flash_2_5' | 'flash_lite' | 'pro_3_0' | 'exp_pro';
-
-interface QuotaCategory {
-  id: QuotaType;
-  label: string;
-  description: string;
-  icon: React.ComponentType<{ className?: string }>;
-  color: string;
-  models: string[];
-}
-
-const QUOTA_CATEGORIES: QuotaCategory[] = [
-  {
-    id: 'exp_pro',
-    label: 'Architect',
-    description: 'Test Generation (gemini-exp-1206)',
-    icon: Brain,
-    color: 'text-purple-500',
-    models: ['gemini-exp-1206', 'gemini-2.0-flash-exp'],
-  },
-  {
-    id: 'flash_lite',
-    label: 'Tutor',
-    description: 'Explanations (gemini-2.0-flash-lite)',
-    icon: MessageSquare,
-    color: 'text-blue-500',
-    models: ['gemini-2.0-flash-lite-preview-02-05', 'gemini-2.0-flash-lite'],
-  },
-  {
-    id: 'pro_3_0',
-    label: 'Critic',
-    description: 'Writing Evaluation (gemini-3-pro)',
-    icon: PenTool,
-    color: 'text-emerald-500',
-    models: ['gemini-3-pro-preview', 'gemini-2.5-pro'],
-  },
-  {
-    id: 'flash_2_5',
-    label: 'Listener',
-    description: 'Speaking Evaluation (gemini-2.0-flash)',
-    icon: Mic,
-    color: 'text-orange-500',
-    models: ['gemini-2.0-flash', 'gemini-2.5-flash'],
-  },
-  {
-    id: 'tts',
-    label: 'Voice',
-    description: 'Text-to-Speech Audio',
-    icon: Volume2,
-    color: 'text-rose-500',
-    models: ['TTS models'],
-  },
-];
 
 export default function ApiKeyQuotaDashboard() {
   const [apiKeys, setApiKeys] = useState<ApiKeyWithQuotas[]>([]);
@@ -151,9 +138,9 @@ export default function ApiKeyQuotaDashboard() {
     return date === today;
   };
 
-  const getQuotaStatus = (key: ApiKeyWithQuotas, quotaType: QuotaType) => {
-    const exhaustedField = `${quotaType}_quota_exhausted` as keyof ApiKeyWithQuotas;
-    const dateField = `${quotaType}_quota_exhausted_date` as keyof ApiKeyWithQuotas;
+  const getModelQuotaStatus = (key: ApiKeyWithQuotas, modelId: string) => {
+    const exhaustedField = `${modelId}_exhausted`;
+    const dateField = `${modelId}_exhausted_date`;
     
     const isExhausted = key[exhaustedField] as boolean | null;
     const exhaustedDate = key[dateField] as string | null;
@@ -161,12 +148,12 @@ export default function ApiKeyQuotaDashboard() {
     return isExhausted && isQuotaExhaustedToday(exhaustedDate);
   };
 
-  const toggleQuota = async (keyId: string, quotaType: QuotaType, currentlyExhausted: boolean) => {
+  const toggleModelQuota = async (keyId: string, modelId: string, currentlyExhausted: boolean) => {
     try {
       const today = new Date().toISOString().split('T')[0];
       const updateData: Record<string, unknown> = {
-        [`${quotaType}_quota_exhausted`]: !currentlyExhausted,
-        [`${quotaType}_quota_exhausted_date`]: !currentlyExhausted ? today : null,
+        [`${modelId}_exhausted`]: !currentlyExhausted,
+        [`${modelId}_exhausted_date`]: !currentlyExhausted ? today : null,
         updated_at: new Date().toISOString(),
       };
 
@@ -182,16 +169,17 @@ export default function ApiKeyQuotaDashboard() {
           key.id === keyId
             ? {
                 ...key,
-                [`${quotaType}_quota_exhausted`]: !currentlyExhausted,
-                [`${quotaType}_quota_exhausted_date`]: !currentlyExhausted ? today : null,
+                [`${modelId}_exhausted`]: !currentlyExhausted,
+                [`${modelId}_exhausted_date`]: !currentlyExhausted ? today : null,
               }
             : key
-        ) as ApiKeyWithQuotas[]
+        )
       );
 
+      const modelConfig = GEMINI_MODELS.find(m => m.id === modelId);
       toast({
         title: 'Success',
-        description: `${quotaType.replace(/_/g, ' ').toUpperCase()} quota ${!currentlyExhausted ? 'disabled' : 'enabled'} for this key`,
+        description: `${modelConfig?.displayName || modelId} ${!currentlyExhausted ? 'marked exhausted' : 'quota reset'} for this key`,
       });
     } catch (error) {
       console.error('Error toggling quota:', error);
@@ -203,11 +191,11 @@ export default function ApiKeyQuotaDashboard() {
     }
   };
 
-  const resetAllQuotasForType = async (quotaType: QuotaType) => {
+  const resetAllQuotasForModel = async (modelId: string) => {
     try {
       const updateData: Record<string, unknown> = {
-        [`${quotaType}_quota_exhausted`]: false,
-        [`${quotaType}_quota_exhausted_date`]: null,
+        [`${modelId}_exhausted`]: false,
+        [`${modelId}_exhausted_date`]: null,
         updated_at: new Date().toISOString(),
       };
 
@@ -221,14 +209,15 @@ export default function ApiKeyQuotaDashboard() {
       setApiKeys(prev =>
         prev.map(key => ({
           ...key,
-          [`${quotaType}_quota_exhausted`]: false,
-          [`${quotaType}_quota_exhausted_date`]: null,
-        })) as ApiKeyWithQuotas[]
+          [`${modelId}_exhausted`]: false,
+          [`${modelId}_exhausted_date`]: null,
+        }))
       );
 
+      const modelConfig = GEMINI_MODELS.find(m => m.id === modelId);
       toast({
         title: 'Success',
-        description: `All ${quotaType.replace(/_/g, ' ')} quotas reset`,
+        description: `All ${modelConfig?.displayName || modelId} quotas reset`,
       });
     } catch (error) {
       console.error('Error resetting quotas:', error);
@@ -240,15 +229,61 @@ export default function ApiKeyQuotaDashboard() {
     }
   };
 
-  const getQuotaSummary = (quotaType: QuotaType) => {
+  const resetAllQuotas = async () => {
+    try {
+      const updateData: Record<string, unknown> = {
+        updated_at: new Date().toISOString(),
+      };
+      
+      // Reset all per-model quotas
+      GEMINI_MODELS.forEach(model => {
+        updateData[`${model.id}_exhausted`] = false;
+        updateData[`${model.id}_exhausted_date`] = null;
+      });
+      
+      // Also reset legacy bucket quotas for compatibility
+      ['tts', 'flash_2_5', 'flash_lite', 'pro_3_0', 'exp_pro'].forEach(bucket => {
+        updateData[`${bucket}_quota_exhausted`] = false;
+        updateData[`${bucket}_quota_exhausted_date`] = null;
+      });
+
+      const { error } = await supabase
+        .from('api_keys')
+        .update(updateData)
+        .eq('provider', 'gemini');
+
+      if (error) throw error;
+
+      await fetchApiKeys();
+
+      toast({
+        title: 'Success',
+        description: 'All model quotas reset',
+      });
+    } catch (error) {
+      console.error('Error resetting all quotas:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to reset quotas',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const getModelSummary = (modelId: string) => {
     const activeKeys = apiKeys.filter(k => k.is_active);
-    const exhaustedKeys = activeKeys.filter(k => getQuotaStatus(k, quotaType));
+    const exhaustedKeys = activeKeys.filter(k => getModelQuotaStatus(k, modelId));
     return {
       total: activeKeys.length,
       available: activeKeys.length - exhaustedKeys.length,
       exhausted: exhaustedKeys.length,
     };
   };
+
+  // Count total exhausted models across all keys
+  const totalExhaustedCount = GEMINI_MODELS.reduce((count, model) => {
+    return count + apiKeys.filter(k => k.is_active && getModelQuotaStatus(k, model.id)).length;
+  }, 0);
 
   if (loading) {
     return (
@@ -260,137 +295,117 @@ export default function ApiKeyQuotaDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Quota Overview Cards */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Model Quota Status</h2>
-        <Button variant="outline" size="sm" onClick={refreshData} disabled={refreshing}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-        {QUOTA_CATEGORIES.map((category) => {
-          const summary = getQuotaSummary(category.id);
-          const Icon = category.icon;
-          const isHealthy = summary.available > 0;
-          
-          return (
-            <Card key={category.id} className={`relative overflow-hidden ${!isHealthy ? 'border-destructive/50' : ''}`}>
-              <CardHeader className="pb-2">
-                <div className="flex items-center justify-between">
-                  <Icon className={`w-5 h-5 ${category.color}`} />
-                  {summary.exhausted > 0 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-xs"
-                      onClick={() => resetAllQuotasForType(category.id)}
-                    >
-                      Reset All
-                    </Button>
-                  )}
-                </div>
-                <CardTitle className="text-sm font-medium">{category.label}</CardTitle>
-                <CardDescription className="text-xs">{category.description}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between">
-                  <div className="text-2xl font-bold">
-                    {summary.available}/{summary.total}
-                  </div>
-                  {isHealthy ? (
-                    <Badge variant="outline" className="text-green-600 border-green-600">
-                      <CheckCircle className="w-3 h-3 mr-1" />
-                      OK
-                    </Badge>
-                  ) : (
-                    <Badge variant="destructive">
-                      <XCircle className="w-3 h-3 mr-1" />
-                      Exhausted
-                    </Badge>
-                  )}
-                </div>
-                {summary.exhausted > 0 && (
-                  <p className="text-xs text-muted-foreground mt-2">
-                    {summary.exhausted} key{summary.exhausted > 1 ? 's' : ''} at limit
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
-
-      {/* Detailed Quota Matrix */}
+      {/* Per-Model Quota Matrix */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Zap className="w-5 h-5 text-primary" />
-            API Key Quota Matrix
-          </CardTitle>
-          <CardDescription>
-            Toggle switches to manually disable models for specific API keys. Disabled models won't be attempted for that key today.
-          </CardDescription>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Zap className="w-5 h-5 text-primary" />
+              <div>
+                <CardTitle>API Key × Model Quota Matrix</CardTitle>
+                <CardDescription>
+                  Track and manage quota exhaustion per model per API key. Toggle to manually mark/reset quotas.
+                </CardDescription>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {totalExhaustedCount > 0 && (
+                <Badge variant="outline" className="text-amber-600 border-amber-600">
+                  {totalExhaustedCount} exhausted
+                </Badge>
+              )}
+              <Button variant="outline" size="sm" onClick={refreshData} disabled={refreshing}>
+                <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
+              {totalExhaustedCount > 0 && (
+                <Button variant="outline" size="sm" onClick={resetAllQuotas}>
+                  Reset All
+                </Button>
+              )}
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[150px]">API Key</TableHead>
-                  <TableHead className="text-center">Status</TableHead>
-                  {QUOTA_CATEGORIES.map((category) => (
-                    <TableHead key={category.id} className="text-center">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <div className="flex flex-col items-center gap-1 cursor-help">
-                            <category.icon className={`w-4 h-4 ${category.color}`} />
-                            <span className="text-xs">{category.label}</span>
-                          </div>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          <p className="font-medium">{category.description}</p>
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Models: {category.models.join(', ')}
-                          </p>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TableHead>
-                  ))}
+                  <TableHead className="w-[120px] sticky left-0 bg-background z-10">API Key</TableHead>
+                  <TableHead className="text-center w-[80px]">Status</TableHead>
+                  {GEMINI_MODELS.map((model) => {
+                    const summary = getModelSummary(model.id);
+                    return (
+                      <TableHead key={model.id} className="text-center min-w-[100px]">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex flex-col items-center gap-1 cursor-help">
+                              <span className="text-xs font-medium">{model.displayName}</span>
+                              <span className={`text-[10px] ${summary.exhausted > 0 ? 'text-amber-500' : 'text-muted-foreground'}`}>
+                                {summary.available}/{summary.total}
+                              </span>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom">
+                            <div className="space-y-1">
+                              <p className="font-medium">{model.apiName}</p>
+                              <p className="text-xs text-muted-foreground">{model.description}</p>
+                              <p className="text-xs">
+                                {summary.available} available, {summary.exhausted} exhausted
+                              </p>
+                              {summary.exhausted > 0 && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-xs w-full mt-1"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    resetAllQuotasForModel(model.id);
+                                  }}
+                                >
+                                  Reset All {model.displayName}
+                                </Button>
+                              )}
+                            </div>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TableHead>
+                    );
+                  })}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {apiKeys.map((key) => (
                   <TableRow key={key.id} className={!key.is_active ? 'opacity-50' : ''}>
-                    <TableCell className="font-mono text-sm">
+                    <TableCell className="font-mono text-sm sticky left-0 bg-background z-10">
                       {maskKey(key.key_value)}
                     </TableCell>
                     <TableCell className="text-center">
                       {key.is_active ? (
-                        <Badge variant="outline" className="text-green-600 border-green-600">
+                        <Badge variant="outline" className="text-green-600 border-green-600 text-[10px]">
                           Active
                         </Badge>
                       ) : (
-                        <Badge variant="outline" className="text-muted-foreground">
-                          Disabled
+                        <Badge variant="outline" className="text-muted-foreground text-[10px]">
+                          Off
                         </Badge>
                       )}
                     </TableCell>
-                    {QUOTA_CATEGORIES.map((category) => {
-                      const isExhausted = getQuotaStatus(key, category.id);
+                    {GEMINI_MODELS.map((model) => {
+                      const isExhausted = getModelQuotaStatus(key, model.id);
                       return (
-                        <TableCell key={category.id} className="text-center">
-                          <div className="flex items-center justify-center gap-2">
+                        <TableCell key={model.id} className="text-center">
+                          <div className="flex items-center justify-center gap-1">
                             <Switch
                               checked={!isExhausted}
-                              onCheckedChange={() => toggleQuota(key.id, category.id, isExhausted ?? false)}
+                              onCheckedChange={() => toggleModelQuota(key.id, model.id, isExhausted ?? false)}
                               disabled={!key.is_active}
+                              className="scale-75"
                             />
                             {isExhausted ? (
-                              <AlertTriangle className="w-4 h-4 text-amber-500" />
+                              <AlertTriangle className="w-3 h-3 text-amber-500" />
                             ) : (
-                              <CheckCircle className="w-4 h-4 text-green-500" />
+                              <CheckCircle className="w-3 h-3 text-green-500" />
                             )}
                           </div>
                         </TableCell>
@@ -400,6 +415,22 @@ export default function ApiKeyQuotaDashboard() {
                 ))}
               </TableBody>
             </Table>
+          </div>
+          
+          {/* Legend */}
+          <div className="mt-4 pt-4 border-t flex flex-wrap gap-4 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1">
+              <CheckCircle className="w-3 h-3 text-green-500" />
+              <span>Available</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3 text-amber-500" />
+              <span>Exhausted today</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <XCircle className="w-3 h-3 text-red-500" />
+              <span>All models exhausted = key unusable</span>
+            </div>
           </div>
         </CardContent>
       </Card>

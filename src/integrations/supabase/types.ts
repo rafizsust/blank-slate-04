@@ -187,6 +187,20 @@ export type Database = {
           flash_2_5_quota_exhausted_date: string | null
           flash_lite_quota_exhausted: boolean | null
           flash_lite_quota_exhausted_date: string | null
+          gemini_2_0_flash_exhausted: boolean | null
+          gemini_2_0_flash_exhausted_date: string | null
+          gemini_2_0_flash_lite_exhausted: boolean | null
+          gemini_2_0_flash_lite_exhausted_date: string | null
+          gemini_2_5_flash_exhausted: boolean | null
+          gemini_2_5_flash_exhausted_date: string | null
+          gemini_2_5_flash_tts_exhausted: boolean | null
+          gemini_2_5_flash_tts_exhausted_date: string | null
+          gemini_2_5_pro_exhausted: boolean | null
+          gemini_2_5_pro_exhausted_date: string | null
+          gemini_3_pro_exhausted: boolean | null
+          gemini_3_pro_exhausted_date: string | null
+          gemini_exp_1206_exhausted: boolean | null
+          gemini_exp_1206_exhausted_date: string | null
           id: string
           is_active: boolean
           key_value: string
@@ -206,6 +220,20 @@ export type Database = {
           flash_2_5_quota_exhausted_date?: string | null
           flash_lite_quota_exhausted?: boolean | null
           flash_lite_quota_exhausted_date?: string | null
+          gemini_2_0_flash_exhausted?: boolean | null
+          gemini_2_0_flash_exhausted_date?: string | null
+          gemini_2_0_flash_lite_exhausted?: boolean | null
+          gemini_2_0_flash_lite_exhausted_date?: string | null
+          gemini_2_5_flash_exhausted?: boolean | null
+          gemini_2_5_flash_exhausted_date?: string | null
+          gemini_2_5_flash_tts_exhausted?: boolean | null
+          gemini_2_5_flash_tts_exhausted_date?: string | null
+          gemini_2_5_pro_exhausted?: boolean | null
+          gemini_2_5_pro_exhausted_date?: string | null
+          gemini_3_pro_exhausted?: boolean | null
+          gemini_3_pro_exhausted_date?: string | null
+          gemini_exp_1206_exhausted?: boolean | null
+          gemini_exp_1206_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value: string
@@ -225,6 +253,20 @@ export type Database = {
           flash_2_5_quota_exhausted_date?: string | null
           flash_lite_quota_exhausted?: boolean | null
           flash_lite_quota_exhausted_date?: string | null
+          gemini_2_0_flash_exhausted?: boolean | null
+          gemini_2_0_flash_exhausted_date?: string | null
+          gemini_2_0_flash_lite_exhausted?: boolean | null
+          gemini_2_0_flash_lite_exhausted_date?: string | null
+          gemini_2_5_flash_exhausted?: boolean | null
+          gemini_2_5_flash_exhausted_date?: string | null
+          gemini_2_5_flash_tts_exhausted?: boolean | null
+          gemini_2_5_flash_tts_exhausted_date?: string | null
+          gemini_2_5_pro_exhausted?: boolean | null
+          gemini_2_5_pro_exhausted_date?: string | null
+          gemini_3_pro_exhausted?: boolean | null
+          gemini_3_pro_exhausted_date?: string | null
+          gemini_exp_1206_exhausted?: boolean | null
+          gemini_exp_1206_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value?: string
@@ -1766,6 +1808,10 @@ export type Database = {
       }
       refund_credits: {
         Args: { p_cost: number; p_user_id: string }
+        Returns: undefined
+      }
+      reset_api_key_model_quotas: {
+        Args: { p_key_id?: string }
         Returns: undefined
       }
       reset_api_key_quotas: { Args: never; Returns: undefined }
