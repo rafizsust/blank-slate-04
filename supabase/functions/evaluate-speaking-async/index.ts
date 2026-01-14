@@ -49,6 +49,21 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Exponential backoff with jitter for rate limit handling
+ * @param attempt - Current attempt number (0-indexed)
+ * @param baseDelayMs - Base delay in milliseconds (default 1000ms)
+ * @param maxDelayMs - Maximum delay in milliseconds (default 60000ms)
+ * @returns Delay in milliseconds with jitter
+ */
+function exponentialBackoffWithJitter(attempt: number, baseDelayMs = 1000, maxDelayMs = 60000): number {
+  // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, capped at maxDelay
+  const exponentialDelay = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);
+  // Add jitter: random value between 0 and 50% of the delay
+  const jitter = Math.random() * exponentialDelay * 0.5;
+  return Math.round(exponentialDelay + jitter);
+}
+
 function extractRetryAfterSeconds(err: any): number | undefined {
   const msg = String(err?.message || err || '');
   const m1 = msg.match(/retryDelay"\s*:\s*"(\d+)s"/i);
@@ -588,8 +603,9 @@ async function runEvaluation(
           { text: prompt } // Then the prompt
         ];
 
-        // Retry once on temporary rate limit
-        for (let attempt = 0; attempt < 2; attempt++) {
+        // Retry with exponential backoff and jitter (max 4 attempts)
+        const MAX_RETRIES = 4;
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
           try {
             const response = await model.generateContent({ contents: [{ role: 'user', parts: contentParts }] });
             const text = response.response?.text?.() || '';
@@ -613,11 +629,11 @@ async function runEvaluation(
             }
           } catch (err: any) {
             const errMsg = String(err?.message || '');
-            console.error(`[runEvaluation] Model ${modelName} failed (attempt ${attempt + 1}/2):`, errMsg.slice(0, 300));
+            console.error(`[runEvaluation] Model ${modelName} failed (attempt ${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 300));
 
-            // Check for quota exhaustion
-            if (isQuotaExhaustedError(errMsg) || isPermanentQuotaExhausted(err)) {
-              // Mark pool key as exhausted
+            // Check for permanent quota exhaustion (billing/plan limit)
+            if (isPermanentQuotaExhausted(err)) {
+              // Mark pool key as exhausted permanently
               if (!candidateKey.isUserProvided && candidateKey.keyId) {
                 await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash_2_5');
               }
@@ -625,15 +641,36 @@ async function runEvaluation(
               throw new QuotaError(errMsg, { permanent: true });
             }
 
-            // Check for temporary rate limit
-            const retryAfter = extractRetryAfterSeconds(err);
-            if (retryAfter && attempt === 0) {
-              console.log(`[runEvaluation] Temporary rate limit, waiting ${retryAfter}s...`);
-              await sleep(Math.min(retryAfter * 1000, 60000));
+            // Check for temporary rate limit (429 errors)
+            if (isQuotaExhaustedError(errMsg)) {
+              // Check if there's a specific retry-after header value
+              const retryAfterFromError = extractRetryAfterSeconds(err);
+              
+              if (attempt < MAX_RETRIES - 1) {
+                // Use exponential backoff with jitter, or specific retry-after if available
+                const backoffDelay = retryAfterFromError 
+                  ? Math.min(retryAfterFromError * 1000, 60000)
+                  : exponentialBackoffWithJitter(attempt, 2000, 60000);
+                
+                console.log(`[runEvaluation] Rate limited (429), retrying in ${Math.round(backoffDelay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+                await sleep(backoffDelay);
+                continue;
+              } else {
+                // Exhausted retries for this key, try next key
+                console.log(`[runEvaluation] Rate limit retries exhausted for this key, trying next...`);
+                throw new QuotaError(errMsg, { permanent: false });
+              }
+            }
+
+            // For other transient errors, apply backoff too
+            if (attempt < MAX_RETRIES - 1) {
+              const backoffDelay = exponentialBackoffWithJitter(attempt, 1000, 30000);
+              console.log(`[runEvaluation] Transient error, retrying in ${Math.round(backoffDelay / 1000)}s...`);
+              await sleep(backoffDelay);
               continue;
             }
 
-            // Not retryable, try next model
+            // Not retryable after max attempts, try next model
             break;
           }
         }

@@ -18,10 +18,14 @@ interface JobPollingOptions<T> {
   onComplete?: (job: T) => void;
   /** Callback when job fails */
   onFailed?: (job: T) => void;
+  /** Callback when job is detected as stale (stuck processing too long) */
+  onStale?: (job: T) => void;
   /** Callback on any status change */
   onStatusChange?: (status: JobStatus, job: T) => void;
   /** Whether polling is enabled */
   enabled?: boolean;
+  /** Stale job timeout in milliseconds (default: 5 minutes) */
+  staleTimeoutMs?: number;
 }
 
 interface JobPollingResult<T> {
@@ -30,10 +34,14 @@ interface JobPollingResult<T> {
   isLoading: boolean;
   error: string | null;
   isSubscribed: boolean;
+  isStale: boolean;
   refetch: () => Promise<void>;
 }
 
-export function useJobPolling<T extends { status: string; id: string }>({
+// Default stale timeout: 5 minutes
+const DEFAULT_STALE_TIMEOUT_MS = 5 * 60 * 1000;
+
+export function useJobPolling<T extends { status: string; id: string; updated_at?: string; created_at?: string }>({
   tableName,
   idColumn = 'id',
   jobId,
@@ -41,27 +49,57 @@ export function useJobPolling<T extends { status: string; id: string }>({
   useRealtime = true,
   onComplete,
   onFailed,
+  onStale,
   onStatusChange,
   enabled = true,
+  staleTimeoutMs = DEFAULT_STALE_TIMEOUT_MS,
 }: JobPollingOptions<T>): JobPollingResult<T> {
   const [job, setJob] = useState<T | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSubscribed, setIsSubscribed] = useState(false);
+  const [isStale, setIsStale] = useState(false);
 
   const pollTimerRef = useRef<number | null>(null);
   const hasCompletedRef = useRef(false);
+  const hasReportedStaleRef = useRef(false);
   const lastStatusRef = useRef<JobStatus | null>(null);
 
   // Keep callbacks stable
   const onCompleteRef = useRef(onComplete);
   const onFailedRef = useRef(onFailed);
+  const onStaleRef = useRef(onStale);
   const onStatusChangeRef = useRef(onStatusChange);
 
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
   useEffect(() => { onFailedRef.current = onFailed; }, [onFailed]);
+  useEffect(() => { onStaleRef.current = onStale; }, [onStale]);
   useEffect(() => { onStatusChangeRef.current = onStatusChange; }, [onStatusChange]);
+
+  /**
+   * Check if a job is stale (stuck in pending/processing for too long)
+   */
+  const checkIfStale = useCallback((jobData: T): boolean => {
+    const jobStatus = jobData.status as JobStatus;
+    
+    // Only check stale for pending/processing jobs
+    if (jobStatus === 'completed' || jobStatus === 'failed') {
+      return false;
+    }
+
+    // Use updated_at if available, otherwise created_at
+    const timestampField = jobData.updated_at || jobData.created_at;
+    if (!timestampField) {
+      return false;
+    }
+
+    const jobTimestamp = new Date(timestampField).getTime();
+    const now = Date.now();
+    const elapsedMs = now - jobTimestamp;
+
+    return elapsedMs > staleTimeoutMs;
+  }, [staleTimeoutMs]);
 
   const handleJobUpdate = useCallback((jobData: T) => {
     const jobStatus = jobData.status as JobStatus;
@@ -69,6 +107,15 @@ export function useJobPolling<T extends { status: string; id: string }>({
     setJob(jobData);
     setStatus(jobStatus);
     setIsLoading(false);
+
+    // Check for stale job
+    const staleDetected = checkIfStale(jobData);
+    if (staleDetected && !hasReportedStaleRef.current) {
+      hasReportedStaleRef.current = true;
+      setIsStale(true);
+      console.warn(`[useJobPolling] Job ${jobData.id} detected as stale (processing for over ${staleTimeoutMs / 1000}s)`);
+      onStaleRef.current?.(jobData);
+    }
 
     // Notify on status change
     if (lastStatusRef.current !== jobStatus) {
@@ -79,14 +126,16 @@ export function useJobPolling<T extends { status: string; id: string }>({
     // Handle completion
     if (jobStatus === 'completed' && !hasCompletedRef.current) {
       hasCompletedRef.current = true;
+      setIsStale(false);
       onCompleteRef.current?.(jobData);
     }
 
     // Handle failure
     if (jobStatus === 'failed') {
+      setIsStale(false);
       onFailedRef.current?.(jobData);
     }
-  }, []);
+  }, [checkIfStale, staleTimeoutMs]);
 
   const fetchJob = useCallback(async () => {
     if (!jobId || !enabled) return;
@@ -170,9 +219,11 @@ export function useJobPolling<T extends { status: string; id: string }>({
   useEffect(() => {
     if (jobId) {
       hasCompletedRef.current = false;
+      hasReportedStaleRef.current = false;
       lastStatusRef.current = null;
       setIsLoading(true);
       setError(null);
+      setIsStale(false);
     }
   }, [jobId]);
 
@@ -182,6 +233,7 @@ export function useJobPolling<T extends { status: string; id: string }>({
     isLoading,
     error,
     isSubscribed,
+    isStale,
     refetch: fetchJob,
   };
 }
