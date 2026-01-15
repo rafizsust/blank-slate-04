@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Mic, Play, Pause, StopCircle, Loader2, CheckCircle2, XCircle, Volume2, VolumeX, ArrowLeft, Globe } from 'lucide-react';
+import { Mic, Play, Pause, StopCircle, Loader2, CheckCircle2, XCircle, Volume2, VolumeX, ArrowLeft, Globe, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { Slider } from '@/components/ui/slider';
@@ -11,15 +11,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { detectBrowser, ACCENT_OPTIONS, getStoredAccent, setStoredAccent } from '@/lib/speechRecognition';
 
-// Accent options for speech recognition
-export const ACCENT_OPTIONS = [
-  { value: 'en-US', label: 'American English' },
-  { value: 'en-GB', label: 'British English' },
-  { value: 'en-IN', label: 'Indian English' },
-  { value: 'en-AU', label: 'Australian English' },
-] as const;
-
+// Re-export for backwards compatibility
+export { ACCENT_OPTIONS };
 export type AccentCode = typeof ACCENT_OPTIONS[number]['value'];
 
 interface MicrophoneTestProps {
@@ -31,15 +33,14 @@ interface MicrophoneTestProps {
 // Helper to check if microphone permission is already granted
 async function checkMicrophonePermission(): Promise<'granted' | 'denied' | 'prompt'> {
   try {
-    // Use Permissions API if available
     if (navigator.permissions && navigator.permissions.query) {
       const result = await navigator.permissions.query({ name: 'microphone' as PermissionName });
       return result.state;
     }
-  } catch (e) {
+  } catch {
     // Permissions API not supported or failed
   }
-  return 'prompt'; // Default to prompt if we can't determine
+  return 'prompt';
 }
 
 // Optimized audio constraints for better speech recognition accuracy
@@ -48,11 +49,13 @@ const OPTIMIZED_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   noiseSuppression: true,
   autoGainControl: true,
   channelCount: 1,
-  // Prefer higher sample rate for better audio quality
   sampleRate: { ideal: 48000 },
 };
 
-export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB' }: MicrophoneTestProps) {
+export function MicrophoneTest({ onTestComplete, onBack, initialAccent }: MicrophoneTestProps) {
+  // Browser detection for conditional UI
+  const [browser] = useState(() => detectBrowser());
+  
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
@@ -66,12 +69,15 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
   const [isMuted, setIsMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  
-  // Track if mic access is already granted (allows skipping the test)
   const [micAccessGranted, setMicAccessGranted] = useState(false);
   
-  // Accent selection state
-  const [selectedAccent, setSelectedAccent] = useState<AccentCode>(initialAccent);
+  // Accent selection - use stored accent or default based on browser
+  const [selectedAccent, setSelectedAccent] = useState<AccentCode>(() => {
+    if (initialAccent) return initialAccent;
+    // For Edge, accent doesn't matter but we still need a value
+    // For Chrome, use stored preference
+    return getStoredAccent() as AccentCode;
+  });
 
   // Check if microphone permission is already granted on mount
   useEffect(() => {
@@ -79,19 +85,16 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
       const permissionState = await checkMicrophonePermission();
       
       if (permissionState === 'granted') {
-        // Permission already granted - verify it works by getting a stream briefly
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ 
             audio: OPTIMIZED_AUDIO_CONSTRAINTS 
           });
           stream.getTracks().forEach(track => track.stop());
-          // Permission is valid and working - allow user to skip test
           console.log('[MicrophoneTest] Microphone permission already granted');
           setMicAccessGranted(true);
-          setTestPassed(true); // Pre-mark as passed so Start Test button is active
-        } catch (e) {
-          // Permission was granted but failed - require the test
-          console.warn('[MicrophoneTest] Permission granted but failed to access mic:', e);
+          setTestPassed(true);
+        } catch {
+          console.warn('[MicrophoneTest] Permission granted but failed to access mic');
           setMicAccessGranted(false);
         }
       } else {
@@ -104,6 +107,11 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
     checkAndSetPermission();
   }, []);
 
+  const handleAccentChange = useCallback((accent: AccentCode) => {
+    setSelectedAccent(accent);
+    setStoredAccent(accent);
+  }, []);
+
   const startRecording = useCallback(async () => {
     setLoading(true);
     setTestPassed(null);
@@ -114,7 +122,6 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
     }
 
     try {
-      // Use optimized audio constraints for better speech recognition
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: OPTIMIZED_AUDIO_CONSTRAINTS 
       });
@@ -129,8 +136,8 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
         const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
         const url = URL.createObjectURL(audioBlob);
         recordedAudioUrl.current = url;
-        setTestPassed(true); // Assume test passed if recording successful
-        setMicAccessGranted(true); // User now has mic access
+        setTestPassed(true);
+        setMicAccessGranted(true);
         stream.getTracks().forEach(track => track.stop());
         setLoading(false);
       };
@@ -162,17 +169,6 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
       setIsPlaying(true);
     } else {
       toast.error('No recording available to play.');
-    }
-  }, []);
-
-  // Note: stopPlaying is kept for potential future use
-  // @ts-expect-error - kept for potential future use
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const stopPlaying = useCallback(() => {
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.pause();
-      audioPlayerRef.current.currentTime = 0;
-      setIsPlaying(false);
     }
   }, []);
 
@@ -221,7 +217,6 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Show loading while checking permission
   if (checkingPermission) {
     return (
       <div className="p-6 max-w-md mx-auto bg-card border border-border rounded-lg shadow-lg space-y-6 text-center">
@@ -251,28 +246,83 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent = 'en-GB'
         }
       </p>
 
-      {/* Accent Selection */}
-      <div className="bg-muted/50 rounded-lg p-4 space-y-3">
-        <div className="flex items-center justify-center gap-2 text-sm font-medium text-foreground">
-          <Globe className="w-4 h-4" />
-          Select Your Accent
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Choosing the correct accent improves speech recognition accuracy by ~30%
-        </p>
-        <Select value={selectedAccent} onValueChange={(v) => setSelectedAccent(v as AccentCode)}>
-          <SelectTrigger className="w-full bg-background">
-            <SelectValue placeholder="Select your accent" />
-          </SelectTrigger>
-          <SelectContent className="bg-popover z-50">
-            {ACCENT_OPTIONS.map((accent) => (
-              <SelectItem key={accent.value} value={accent.value}>
-                {accent.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      {/* Browser Mode Badge */}
+      <div className="flex justify-center">
+        {browser.isEdge ? (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge variant="secondary" className="gap-1.5">
+                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                  Edge Natural Mode
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs">
+                <p className="text-xs">
+                  Edge uses natural speech optimization that preserves pauses and fillers for accurate fluency scoring. No accent selection needed.
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : browser.isChrome ? (
+          <Badge variant="outline" className="gap-1.5">
+            <span className="w-2 h-2 bg-blue-500 rounded-full" />
+            Chrome Accent Mode
+          </Badge>
+        ) : (
+          <Badge variant="outline">{browser.browserName}</Badge>
+        )}
       </div>
+
+      {/* Accent Selection - ONLY shown on Chrome, not on Edge */}
+      {browser.isChrome && (
+        <div className="bg-muted/50 rounded-lg p-4 space-y-3">
+          <div className="flex items-center justify-center gap-2 text-sm font-medium text-foreground">
+            <Globe className="w-4 h-4" />
+            Select Your Accent
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Info className="w-3.5 h-3.5 text-muted-foreground cursor-help" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  <p className="text-xs">
+                    Chrome requires accent selection for stable speech recognition. 
+                    This setting is remembered for future tests.
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Choosing the correct accent improves speech recognition accuracy by ~30%
+          </p>
+          <Select value={selectedAccent} onValueChange={(v) => handleAccentChange(v as AccentCode)}>
+            <SelectTrigger className="w-full bg-background">
+              <SelectValue placeholder="Select your accent" />
+            </SelectTrigger>
+            <SelectContent className="bg-popover z-50">
+              {ACCENT_OPTIONS.map((accent) => (
+                <SelectItem key={accent.value} value={accent.value}>
+                  {accent.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {/* Edge info panel */}
+      {browser.isEdge && (
+        <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4 space-y-2">
+          <p className="text-sm font-medium text-green-700 dark:text-green-400">
+            ✓ Optimal browser detected
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Microsoft Edge provides the best speech recognition experience with natural pause and filler detection for accurate fluency scoring.
+          </p>
+        </div>
+      )}
 
       {/* Recording indicator */}
       {isRecording && (
