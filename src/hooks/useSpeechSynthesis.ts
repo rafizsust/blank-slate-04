@@ -86,55 +86,102 @@ export function useSpeechSynthesis(config: SpeechSynthesisConfig = {}) {
       return;
     }
 
+    // Helper to check if voice is local (not "Online" which requires server handshake)
+    const isLocalVoice = (v: SpeechSynthesisVoice) => !v.name.includes('Online');
+
     const loadVoices = () => {
       const availableVoices = window.speechSynthesis.getVoices();
       setVoices(availableVoices);
 
-      // Try to find a good British English male voice
-      const preferredVoices = [
-        'Google UK English Male',
-        'Microsoft George - English (United Kingdom)',
-        'Daniel',
-        'en-GB-George',
-        'en-GB',
-      ];
-
       let voice: SpeechSynthesisVoice | null = null;
 
-      // First try to match by config voiceName
-      if (config.voiceName) {
-        voice = availableVoices.find(v => 
-          v.name.toLowerCase().includes(config.voiceName!.toLowerCase())
-        ) || null;
-      }
-
-      // Then try preferred voices
-      if (!voice) {
-        for (const preferred of preferredVoices) {
+      // EDGE FIX: Prefer LOCAL voices to avoid server handshake issues with "Online" voices
+      if (browserInfo.isEdge) {
+        console.log('[TTS Edge] Filtering for LOCAL voices (avoiding unreliable Online voices)');
+        
+        // First try to match config voiceName with local voice
+        if (config.voiceName) {
           voice = availableVoices.find(v => 
-            v.name.includes(preferred) || v.lang.includes(preferred)
+            isLocalVoice(v) && v.name.toLowerCase().includes(config.voiceName!.toLowerCase())
           ) || null;
-          if (voice) break;
         }
-      }
 
-      // Fallback to any British English voice
-      if (!voice) {
-        voice = availableVoices.find(v => 
-          v.lang === 'en-GB' || v.lang.startsWith('en-GB')
-        ) || null;
-      }
+        // Then try local British English voice
+        if (!voice) {
+          voice = availableVoices.find(v => 
+            isLocalVoice(v) && (v.lang === 'en-GB' || v.lang.startsWith('en-GB'))
+          ) || null;
+        }
 
-      // Final fallback to any English voice
-      if (!voice) {
-        voice = availableVoices.find(v => 
-          v.lang.startsWith('en')
-        ) || null;
+        // Then any local English voice
+        if (!voice) {
+          voice = availableVoices.find(v => 
+            isLocalVoice(v) && v.lang.startsWith('en')
+          ) || null;
+        }
+
+        // Any local voice
+        if (!voice) {
+          voice = availableVoices.find(v => isLocalVoice(v)) || null;
+        }
+
+        // Last resort: any voice including Online (better than nothing)
+        if (!voice && availableVoices.length > 0) {
+          voice = availableVoices[0];
+          console.warn('[TTS Edge] No local voices found, using Online voice (may be unreliable):', voice.name);
+        }
+
+        if (voice) {
+          console.log('[TTS Edge] Selected voice:', voice.name, '| Local:', isLocalVoice(voice));
+        }
+      } else {
+        // Non-Edge browsers: original logic
+        const preferredVoices = [
+          'Google UK English Male',
+          'Microsoft George - English (United Kingdom)',
+          'Daniel',
+          'en-GB-George',
+          'en-GB',
+        ];
+
+        // First try to match by config voiceName
+        if (config.voiceName) {
+          voice = availableVoices.find(v => 
+            v.name.toLowerCase().includes(config.voiceName!.toLowerCase())
+          ) || null;
+        }
+
+        // Then try preferred voices
+        if (!voice) {
+          for (const preferred of preferredVoices) {
+            voice = availableVoices.find(v => 
+              v.name.includes(preferred) || v.lang.includes(preferred)
+            ) || null;
+            if (voice) break;
+          }
+        }
+
+        // Fallback to any British English voice
+        if (!voice) {
+          voice = availableVoices.find(v => 
+            v.lang === 'en-GB' || v.lang.startsWith('en-GB')
+          ) || null;
+        }
+
+        // Final fallback to any English voice
+        if (!voice) {
+          voice = availableVoices.find(v => 
+            v.lang.startsWith('en')
+          ) || null;
+        }
+
+        if (voice) {
+          console.log('Selected TTS voice:', voice.name, voice.lang);
+        }
       }
 
       if (voice) {
         setSelectedVoice(voice);
-        console.log('Selected TTS voice:', voice.name, voice.lang);
       }
     };
 

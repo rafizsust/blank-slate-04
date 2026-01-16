@@ -74,7 +74,8 @@ export function SimulatedAudioPlayer({
   const wordCount = text.split(/\s+/).filter(Boolean).length;
   const estimatedDuration = Math.ceil(wordCount / 2.5);
 
-  // Get best available voice
+  // Get best available voice - EDGE CRITICAL: Prefer LOCAL voices over "Online" voices
+  // Edge's "Online" (Natural) voices require server handshakes that often fail silently
   const getBestVoice = useCallback((): SpeechSynthesisVoice | null => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
     
@@ -89,7 +90,43 @@ export function SimulatedAudioPlayer({
 
     const preferredLangs = accentMap[accentHint] || ['en-GB'];
 
-    // Priority order for voice selection - prefer high-quality voices
+    // EDGE FIX: Filter out "Online" voices which are unreliable
+    // "Online" voices in Edge require network handshakes that often fail
+    const isLocalVoice = (v: SpeechSynthesisVoice) => {
+      // Edge "Online" voices have "Online" in their name
+      // Local voices don't have "Online" in the name
+      return !v.name.includes('Online');
+    };
+
+    // In Edge, strongly prefer local voices to avoid the server handshake issue
+    if (browserInfo.isEdge) {
+      console.log('[SimulatedAudio Edge] Filtering for LOCAL voices only (avoiding Online voices)');
+      
+      // Priority for Edge: LOCAL English voices only
+      const edgePriorities = [
+        // 1. Local voice matching accent
+        (v: SpeechSynthesisVoice) =>
+          isLocalVoice(v) &&
+          preferredLangs.some((l) => v.lang.includes(l.replace('_', '-'))),
+        // 2. Any local English voice
+        (v: SpeechSynthesisVoice) =>
+          isLocalVoice(v) && v.lang.startsWith('en'),
+        // 3. Any local voice
+        (v: SpeechSynthesisVoice) => isLocalVoice(v),
+        // 4. Last resort: any voice (including Online)
+        () => true,
+      ];
+
+      for (const priority of edgePriorities) {
+        const match = voices.find(priority);
+        if (match) {
+          console.log('[SimulatedAudio Edge] Selected voice:', match.name, '| Local:', isLocalVoice(match));
+          return match;
+        }
+      }
+    }
+
+    // Non-Edge browsers: use original priority (prefer high-quality voices)
     const voicePriorities = [
       // 1. Match accent + high-quality voices (Google, Microsoft, Natural)
       (v: SpeechSynthesisVoice) =>
@@ -351,28 +388,73 @@ export function SimulatedAudioPlayer({
     setCurrentTime(0);
     pausedTimeRef.current = 0;
 
-    // Edge workaround: Ensure voices are loaded before speaking
-    // Edge sometimes needs getVoices() called to trigger voice loading
+    // Edge workaround: Prime the speech engine with a "wake up" call before speaking
+    // Edge's speech engine can be dormant and fail silently on first use
     if (browserInfo.isEdge) {
       const voices = window.speechSynthesis.getVoices();
+      console.log('[SimulatedAudio Edge] Available voices:', voices.length);
+      
       if (voices.length === 0) {
+        // Wait for voices to load
         console.log('[SimulatedAudio Edge] No voices loaded, waiting for voiceschanged...');
         const voicesLoaded = () => {
           window.speechSynthesis.onvoiceschanged = null;
-          console.log('[SimulatedAudio Edge] Voices loaded, starting speech');
-          speakChunk(0);
+          console.log('[SimulatedAudio Edge] Voices loaded, priming engine...');
+          primeAndSpeak();
         };
         window.speechSynthesis.onvoiceschanged = voicesLoaded;
-        // Fallback: start anyway after 500ms if voices don't load
+        // Fallback: start anyway after 500ms
         setTimeout(() => {
           if (ttsSessionRef.current === mySession) {
             window.speechSynthesis.onvoiceschanged = null;
-            console.log('[SimulatedAudio Edge] Fallback: starting speech without waiting for voices');
-            speakChunk(0);
+            console.log('[SimulatedAudio Edge] Fallback: starting without voice wait');
+            primeAndSpeak();
           }
         }, 500);
       } else {
-        speakChunk(0);
+        primeAndSpeak();
+      }
+
+      // Prime the engine with a silent utterance, then speak
+      function primeAndSpeak() {
+        // Cancel and flush the queue
+        window.speechSynthesis.cancel();
+        
+        // Create a silent "wake up" utterance
+        const wakeUp = new SpeechSynthesisUtterance(' ');
+        wakeUp.volume = 0;
+        wakeUp.rate = 10; // Fastest possible to minimize delay
+        
+        const voice = getBestVoice();
+        if (voice) wakeUp.voice = voice;
+        
+        let wakeUpComplete = false;
+        
+        wakeUp.onend = () => {
+          if (wakeUpComplete) return;
+          wakeUpComplete = true;
+          console.log('[SimulatedAudio Edge] Wake-up complete, starting actual speech');
+          speakChunk(0);
+        };
+        
+        wakeUp.onerror = () => {
+          if (wakeUpComplete) return;
+          wakeUpComplete = true;
+          console.warn('[SimulatedAudio Edge] Wake-up failed, trying speech anyway');
+          speakChunk(0);
+        };
+        
+        // Timeout fallback in case wake-up never completes
+        setTimeout(() => {
+          if (!wakeUpComplete && ttsSessionRef.current === mySession) {
+            wakeUpComplete = true;
+            console.warn('[SimulatedAudio Edge] Wake-up timeout, proceeding with speech');
+            window.speechSynthesis.cancel();
+            speakChunk(0);
+          }
+        }, 500);
+        
+        window.speechSynthesis.speak(wakeUp);
       }
     } else {
       speakChunk(0);
