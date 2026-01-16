@@ -584,14 +584,16 @@ export default function AIPracticeSpeakingTest() {
     if (speechAnalysis.isAnalyzing) {
       const analysis = speechAnalysis.stop();
       
-      // Silence Safety Gate: If analysis is null (silent audio with possible hallucination), 
-      // prompt user to record again
+      // CRITICAL FIX: Don't discard audio if speech analysis fails
+      // MediaRecorder may have captured valid audio even if speech recognition didn't work
+      // Only warn the user but keep the recording
       if (!analysis) {
-        console.warn(`[SpeakingTest] Silent/invalid recording for ${key} - discarding`);
+        console.warn(`[SpeakingTest] Speech analysis returned null for ${key} - keeping audio anyway`);
+        // Still show warning but don't block submission
         toast({
-          title: 'Recording Issue',
-          description: 'No speech was detected. Please try recording again.',
-          variant: 'destructive',
+          title: 'Speech Recognition Issue',
+          description: 'Speech analysis unavailable, but your audio was recorded. You can still submit.',
+          variant: 'default',
         });
       } else if (key) {
         console.log(`[SpeakingTest] Speech analysis for ${key}:`, {
