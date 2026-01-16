@@ -200,8 +200,11 @@ serve(async (req) => {
           .from('speaking_evaluation_jobs')
           .update({
             status: 'failed',
-            last_error: processError.message,
+            stage: 'failed',
+            last_error: `Evaluation failed after ${maxRetries} attempts: ${processError.message}`,
             retry_count: retryCount,
+            lock_token: null,
+            lock_expires_at: null,
             updated_at: new Date().toISOString(),
           })
           .eq('id', jobId);
