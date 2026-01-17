@@ -3,6 +3,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -99,10 +100,11 @@ function getTopicsForModule(module: string, questionType?: string): readonly str
 }
 
 export default function TestBankRecommendations() {
-  const [recommendations, setRecommendations] = useState<RecommendationItem[]>([]);
+  const [allRecommendations, setAllRecommendations] = useState<RecommendationItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState<GeneratingState | null>(null);
   const [recentlyGenerated, setRecentlyGenerated] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<string>('reading');
   const { toast } = useToast();
 
   const fetchRecommendations = useCallback(async () => {
@@ -158,8 +160,7 @@ export default function TestBankRecommendations() {
         return a.topic.localeCompare(b.topic);
       });
 
-      // Take top 20 recommendations (lowest counts)
-      setRecommendations(allCombinations.slice(0, 20));
+      setAllRecommendations(allCombinations);
     } catch (err) {
       console.error('Error fetching recommendations:', err);
       toast({
@@ -259,6 +260,119 @@ export default function TestBankRecommendations() {
     return qType.replace(/_/g, ' ').replace(/FULL TEST/gi, 'Full Test');
   };
 
+  // Get recommendations filtered by module, limited to 10 per module
+  const getModuleRecommendations = (module: string) => {
+    return allRecommendations
+      .filter((r) => r.module === module)
+      .slice(0, 10);
+  };
+
+  const renderRecommendationsList = (recommendations: RecommendationItem[]) => {
+    if (recommendations.length === 0) {
+      return (
+        <div className="text-center py-8 text-muted-foreground">
+          <Check className="w-12 h-12 mx-auto mb-4 text-success" />
+          <p>Great coverage! All combinations have tests.</p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-3">
+        {recommendations.map((item, idx) => {
+          const key = `${item.module}|${item.questionType}|${item.difficulty}|${item.topic}`;
+          const isGenerating = generating?.module === item.module &&
+            generating?.questionType === item.questionType &&
+            generating?.topic === item.topic &&
+            generating?.difficulty === item.difficulty;
+          const wasRecentlyGenerated = recentlyGenerated.has(key);
+          const ModuleIcon = MODULE_ICONS[item.module] || BookOpen;
+
+          return (
+            <div
+              key={idx}
+              className={`flex items-center justify-between p-4 border rounded-lg transition-all ${
+                wasRecentlyGenerated
+                  ? 'bg-success/5 border-success/30'
+                  : 'hover:bg-muted/50'
+              }`}
+            >
+              <div className="flex items-center gap-3 flex-1">
+                {/* Priority indicator */}
+                <div className="flex flex-col items-center">
+                  <span className="text-lg font-bold text-muted-foreground">#{idx + 1}</span>
+                  {item.count === 0 && (
+                    <AlertCircle className="w-4 h-4 text-destructive mt-1" />
+                  )}
+                </div>
+
+                {/* Module icon */}
+                <div className={`p-2 rounded-lg ${MODULE_COLORS[item.module]}`}>
+                  <ModuleIcon className="w-4 h-4" />
+                </div>
+
+                {/* Details */}
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant="secondary" className="text-xs">
+                      {formatQuestionType(item.questionType)}
+                    </Badge>
+                    <Badge variant="outline" className={DIFFICULTY_COLORS[item.difficulty]}>
+                      {item.difficulty}
+                    </Badge>
+                  </div>
+                  <span className="text-sm text-muted-foreground truncate max-w-[300px]">
+                    {item.topic}
+                  </span>
+                </div>
+              </div>
+
+              {/* Count & Generate button */}
+              <div className="flex items-center gap-4">
+                <div className="text-right">
+                  <div className="text-2xl font-bold">{item.count}</div>
+                  <div className="text-xs text-muted-foreground">tests</div>
+                </div>
+
+                <Button
+                  onClick={() => generateTest(item)}
+                  disabled={isGenerating || !!generating}
+                  className="min-w-[120px]"
+                  variant={item.count === 0 ? 'default' : 'outline'}
+                >
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Generating...
+                    </>
+                  ) : wasRecentlyGenerated ? (
+                    <>
+                      <Check className="w-4 h-4 mr-2" />
+                      Queued
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 mr-2" />
+                      Generate 1
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // Calculate stats per module
+  const getModuleStats = (module: string) => {
+    const moduleRecs = allRecommendations.filter((r) => r.module === module);
+    const zeroCount = moduleRecs.filter((r) => r.count === 0).length;
+    const lowCount = moduleRecs.filter((r) => r.count > 0 && r.count < 3).length;
+    return { zeroCount, lowCount, total: moduleRecs.length };
+  };
+
   return (
     <Card className="border-0 shadow-lg">
       <CardHeader>
@@ -273,7 +387,7 @@ export default function TestBankRecommendations() {
                 Smart Recommendations
               </CardTitle>
               <CardDescription>
-                Tests with the lowest coverage. Generate with one click!
+                Tests with the lowest coverage per module. Generate with one click!
               </CardDescription>
             </div>
           </div>
@@ -290,114 +404,67 @@ export default function TestBankRecommendations() {
               <div key={i} className="h-16 bg-muted animate-pulse rounded-lg" />
             ))}
           </div>
-        ) : recommendations.length === 0 ? (
-          <div className="text-center py-8 text-muted-foreground">
-            <Check className="w-12 h-12 mx-auto mb-4 text-success" />
-            <p>Great coverage! All combinations have tests.</p>
-          </div>
         ) : (
-          <div className="space-y-3">
-            {recommendations.map((item, idx) => {
-              const key = `${item.module}|${item.questionType}|${item.difficulty}|${item.topic}`;
-              const isGenerating = generating?.module === item.module &&
-                generating?.questionType === item.questionType &&
-                generating?.topic === item.topic &&
-                generating?.difficulty === item.difficulty;
-              const wasRecentlyGenerated = recentlyGenerated.has(key);
-              const ModuleIcon = MODULE_ICONS[item.module] || BookOpen;
+          <Tabs value={activeTab} onValueChange={setActiveTab}>
+            <TabsList className="grid w-full grid-cols-4 mb-6">
+              <TabsTrigger value="reading" className="flex items-center gap-2">
+                <BookOpen className="w-4 h-4" />
+                <span className="hidden sm:inline">Reading</span>
+                <Badge variant="secondary" className="ml-1 text-xs">
+                  {getModuleStats('reading').zeroCount}
+                </Badge>
+              </TabsTrigger>
+              <TabsTrigger value="listening" className="flex items-center gap-2">
+                <Headphones className="w-4 h-4" />
+                <span className="hidden sm:inline">Listening</span>
+                <Badge variant="secondary" className="ml-1 text-xs">
+                  {getModuleStats('listening').zeroCount}
+                </Badge>
+              </TabsTrigger>
+              <TabsTrigger value="writing" className="flex items-center gap-2">
+                <PenTool className="w-4 h-4" />
+                <span className="hidden sm:inline">Writing</span>
+                <Badge variant="secondary" className="ml-1 text-xs">
+                  {getModuleStats('writing').zeroCount}
+                </Badge>
+              </TabsTrigger>
+              <TabsTrigger value="speaking" className="flex items-center gap-2">
+                <Mic className="w-4 h-4" />
+                <span className="hidden sm:inline">Speaking</span>
+                <Badge variant="secondary" className="ml-1 text-xs">
+                  {getModuleStats('speaking').zeroCount}
+                </Badge>
+              </TabsTrigger>
+            </TabsList>
 
-              return (
-                <div
-                  key={idx}
-                  className={`flex items-center justify-between p-4 border rounded-lg transition-all ${
-                    wasRecentlyGenerated
-                      ? 'bg-success/5 border-success/30'
-                      : 'hover:bg-muted/50'
-                  }`}
-                >
-                  <div className="flex items-center gap-3 flex-1">
-                    {/* Priority indicator */}
-                    <div className="flex flex-col items-center">
-                      <span className="text-lg font-bold text-muted-foreground">#{idx + 1}</span>
-                      {item.count === 0 && (
-                        <AlertCircle className="w-4 h-4 text-destructive mt-1" />
-                      )}
-                    </div>
-
-                    {/* Module icon */}
-                    <div className={`p-2 rounded-lg ${MODULE_COLORS[item.module]}`}>
-                      <ModuleIcon className="w-4 h-4" />
-                    </div>
-
-                    {/* Details */}
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Badge variant="outline" className={MODULE_COLORS[item.module]}>
-                          {item.module}
-                        </Badge>
-                        <Badge variant="secondary" className="text-xs">
-                          {formatQuestionType(item.questionType)}
-                        </Badge>
-                        <Badge variant="outline" className={DIFFICULTY_COLORS[item.difficulty]}>
-                          {item.difficulty}
-                        </Badge>
-                      </div>
-                      <span className="text-sm text-muted-foreground truncate max-w-[300px]">
-                        {item.topic}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Count & Generate button */}
-                  <div className="flex items-center gap-4">
-                    <div className="text-right">
-                      <div className="text-2xl font-bold">{item.count}</div>
-                      <div className="text-xs text-muted-foreground">tests</div>
-                    </div>
-
-                    <Button
-                      onClick={() => generateTest(item)}
-                      disabled={isGenerating || !!generating}
-                      className="min-w-[120px]"
-                      variant={item.count === 0 ? 'default' : 'outline'}
-                    >
-                      {isGenerating ? (
-                        <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          Generating...
-                        </>
-                      ) : wasRecentlyGenerated ? (
-                        <>
-                          <Check className="w-4 h-4 mr-2" />
-                          Queued
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-4 h-4 mr-2" />
-                          Generate 1
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+            <TabsContent value="reading">
+              {renderRecommendationsList(getModuleRecommendations('reading'))}
+            </TabsContent>
+            <TabsContent value="listening">
+              {renderRecommendationsList(getModuleRecommendations('listening'))}
+            </TabsContent>
+            <TabsContent value="writing">
+              {renderRecommendationsList(getModuleRecommendations('writing'))}
+            </TabsContent>
+            <TabsContent value="speaking">
+              {renderRecommendationsList(getModuleRecommendations('speaking'))}
+            </TabsContent>
+          </Tabs>
         )}
 
         {/* Footer stats */}
-        {!loading && recommendations.length > 0 && (
+        {!loading && (
           <div className="mt-6 p-4 bg-muted/50 rounded-lg">
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">
-                Showing top {recommendations.length} recommendations based on lowest test counts
+                Showing top 10 recommendations per module based on lowest test counts
               </span>
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="bg-destructive/10 text-destructive">
-                  {recommendations.filter((r) => r.count === 0).length} with 0 tests
+                  {getModuleStats(activeTab).zeroCount} with 0 tests
                 </Badge>
                 <Badge variant="outline" className="bg-warning/10 text-warning">
-                  {recommendations.filter((r) => r.count > 0 && r.count < 3).length} with 1-2 tests
+                  {getModuleStats(activeTab).lowCount} with 1-2 tests
                 </Badge>
               </div>
             </div>

@@ -392,6 +392,52 @@ export default function AIPracticeHistory() {
 
   // Retry a failed/stale speaking evaluation
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+
+  // Cancel a pending/processing speaking evaluation
+  const handleCancelEvaluation = async (testId: string) => {
+    const pendingJob = pendingEvaluations.get(testId);
+    if (!pendingJob) return;
+
+    setCancellingJobId(pendingJob.id);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        toast({ title: 'Error', description: 'Please log in to cancel', variant: 'destructive' });
+        return;
+      }
+
+      const response = await supabase.functions.invoke('cancel-speaking-job', {
+        body: { jobId: pendingJob.id },
+      });
+
+      if (response.error) {
+        throw new Error(response.error.message);
+      }
+
+      toast({
+        title: 'Evaluation Cancelled',
+        description: 'The speaking evaluation has been cancelled.',
+      });
+
+      // Remove from pending evaluations
+      setPendingEvaluations(prev => {
+        const updated = new Map(prev);
+        updated.delete(testId);
+        return updated;
+      });
+
+    } catch (err: any) {
+      console.error('Failed to cancel evaluation:', err);
+      toast({
+        title: 'Cancel Failed',
+        description: err.message || 'Failed to cancel evaluation',
+        variant: 'destructive',
+      });
+    } finally {
+      setCancellingJobId(null);
+    }
+  };
   
   const handleRetryEvaluation = async (testId: string) => {
     const pendingJob = pendingEvaluations.get(testId);
@@ -776,8 +822,26 @@ export default function AIPracticeHistory() {
                               <Eye className="w-4 h-4" />
                             </Button>
                           )}
-                          {/* Retry button for stale, failed or stuck evaluations */}
-                          {isPendingEval && pendingJob && ['stale', 'failed', 'pending'].includes(pendingJob.status) && (
+                          {/* Cancel button for pending/processing evaluations */}
+                          {isPendingEval && pendingJob && ['pending', 'processing', 'retrying'].includes(pendingJob.status) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleCancelEvaluation(test.id)}
+                              disabled={cancellingJobId === pendingJob.id}
+                              className="gap-1 border-destructive/50 text-destructive hover:bg-destructive/10"
+                              title="Cancel evaluation"
+                            >
+                              {cancellingJobId === pendingJob.id ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4" />
+                              )}
+                              <span className="hidden sm:inline">Cancel</span>
+                            </Button>
+                          )}
+                          {/* Retry button for stale, failed evaluations */}
+                          {isPendingEval && pendingJob && ['stale', 'failed'].includes(pendingJob.status) && (
                             <Button
                               variant="outline"
                               size="sm"

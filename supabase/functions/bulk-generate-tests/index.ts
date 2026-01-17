@@ -295,7 +295,7 @@ async function fetchWithTimeout(
 
 // ============================================================================
 // SPEAKING PART 3 ENFORCEMENT (count + word-length)
-// - Requirement: Part 3 must have 4-5 questions
+// - Requirement: Part 3 must have exactly 4 questions
 // - Requirement: Each Part 3 question must be 12-16 words
 // ============================================================================
 
@@ -398,10 +398,10 @@ function normalizePart3Questions(
     }
   }
 
-  // Max 5 questions
+  // Limit to exactly maxQuestions (4)
   const limited = unique.slice(0, opts.maxQuestions);
 
-  // Ensure minimum 4 by appending safe fallbacks
+  // Ensure minimum by appending safe fallbacks
   let idx = 0;
   while (limited.length < opts.minQuestions && idx < fallback.length) {
     const candidate = enforceWordCountRange(fallback[idx], opts.minWords, opts.maxWords);
@@ -441,7 +441,7 @@ function enforceSpeakingPart3Constraints(content: any): void {
 
   const normalizedQuestions = normalizePart3Questions(part3.questions, {
     minQuestions: 4,
-    maxQuestions: 5,
+    maxQuestions: 4, // Fixed to exactly 4 questions
     minWords: 12,
     maxWords: 16,
   });
@@ -678,7 +678,7 @@ async function processGenerationJob(
         throw new Error("Content generation failed - empty response");
       }
 
-      // SPEAKING: Enforce Part 3 constraints (4-5 questions, 12-16 words each)
+      // SPEAKING: Enforce Part 3 constraints (exactly 4 questions, 12-16 words each)
       if (module === "speaking") {
         enforceSpeakingPart3Constraints(content);
       }
@@ -1913,7 +1913,7 @@ CRITICAL - CAMBRIDGE STANDARD DISCUSSION:
 - Questions need opinion/analysis but should NOT be overly philosophical
 - Avoid complex academic language - use conversational tone
 
-Part 3 = discussion questions. Generate 4 or 5 CLEAR questions requiring opinion/analysis (minimum 4, maximum 5).
+Part 3 = discussion questions. Generate EXACTLY 4 CLEAR questions requiring opinion/analysis.
 STRICT WORD COUNT: Each question MUST have EXACTLY 12-16 words (minimum 12, maximum 16). Count every word!
 Example good questions (12-16 words each):
 - "What do you think are the main benefits of learning a foreign language?" (14 words)
@@ -1947,7 +1947,7 @@ CRITICAL - CAMBRIDGE STANDARD FOR ALL PARTS:
 1. Target Band 7-8 level throughout - NOT Band 9+ complexity
 2. Part 1 questions: SHORT (8-15 words), simple, conversational
 3. Part 2 cue card: Clear topic, CONCISE bullet points (5-8 words each)
-4. Part 3 questions: 4-5 questions, STRICT 12-16 words each (MINIMUM 12 words, count carefully!)
+4. Part 3 questions: EXACTLY 4 questions, STRICT 12-16 words each (MINIMUM 12 words, count carefully!)
 5. ${selectedVariety}
 6. Each question explores a DIFFERENT aspect of the topic
 7. Questions should sound like natural examiner speech

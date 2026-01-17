@@ -796,7 +796,7 @@ function extractJsonFromResponse(text: string): string {
 
 // ============================================================================
 // SPEAKING PART 3 ENFORCEMENT (count + word-length)
-// - Requirement: Part 3 must have 4-5 questions
+// - Requirement: Part 3 must have exactly 4 questions
 // - Requirement: Each Part 3 question must be 12-16 words
 // ============================================================================
 
@@ -901,8 +901,8 @@ function enforceSpeakingPart3Parts(rawParts: any): any {
       }
     }
 
-    // Enforce max 5
-    const limited = unique.slice(0, 5);
+    // Enforce max 4 (exactly 4 questions)
+    const limited = unique.slice(0, 4);
 
     // Enforce min 4
     let idx = 0;
@@ -4310,7 +4310,7 @@ Generate natural, conversational questions matching Cambridge IELTS Band 7-8 dif
         });
       }
 
-      // Enforce Part 3 constraints (4-5 questions, 12-16 words each)
+      // Enforce Part 3 constraints (exactly 4 questions, 12-16 words each)
       try {
         if (parsed?.parts) {
           parsed.parts = enforceSpeakingPart3Parts(parsed.parts);
