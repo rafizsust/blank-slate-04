@@ -596,31 +596,22 @@ export function useBrowserAdaptiveSpeechRecognition(
   }, [isSupported, createRecognitionInstance, attachHandlers, resetSilenceTimeout]);
 
   // ==================== PUBLIC: stopListening ====================
+  /**
+   * CRITICAL: Stop with a small grace period to capture late finals.
+   * Chrome/Edge often deliver the last final result ~100-200ms AFTER stop() is called.
+   * We defer the flush to the end of onend OR after a timeout, whichever comes first.
+   */
   const stopListening = useCallback(() => {
     console.log('[SpeechRecognition] Stopping...', {
       segmentCount: finalSegmentsRef.current.length,
       hasInterimToFlush: Boolean(latestInterimRef.current?.trim()),
     });
 
-    // Flush interim BEFORE stopping to avoid losing the tail.
-    const interim = latestInterimRef.current?.trim();
-    if (interim) {
-      // Prefer duplication over missing words.
-      if (interim !== lastExactFinalRef.current) {
-        finalSegmentsRef.current.push(interim);
-        const fullTranscript = finalSegmentsRef.current.join(' ');
-        setFinalTranscript(fullTranscript);
-        setRawTranscript(fullTranscript);
-      }
-      latestInterimRef.current = '';
-      setInterimTranscript('');
-    }
-
-    // Set flags FIRST to prevent any restart attempts
+    // Mark that the user wants to stop - prevents restarts in onend
     isManualStopRef.current = true;
-    isRecordingRef.current = false;
-
-    // Clear timers
+    // Keep isRecordingRef TRUE briefly so late onresult events still get processed
+    
+    // Clear watchdog immediately (no more proactive restarts)
     if (watchdogTimerRef.current) {
       clearInterval(watchdogTimerRef.current);
       watchdogTimerRef.current = null;
@@ -630,7 +621,7 @@ export function useBrowserAdaptiveSpeechRecognition(
       silenceTimerRef.current = null;
     }
 
-    // Stop recognition gracefully
+    // Stop recognition - this triggers final results before onend
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -639,11 +630,30 @@ export function useBrowserAdaptiveSpeechRecognition(
       }
     }
 
-    setIsListening(false);
-    pauseTrackerRef.current.stop();
-    setPauseMetrics(pauseTrackerRef.current.getMetrics());
-
-    console.log('[SpeechRecognition] Stopped');
+    // Give browser 150ms grace period for late final results before flushing interim
+    // onend handler also flushes, so this is a fallback
+    setTimeout(() => {
+      // Now mark as truly not recording
+      isRecordingRef.current = false;
+      
+      // Flush any remaining interim that wasn't converted to final
+      const interim = latestInterimRef.current?.trim();
+      if (interim && interim !== lastExactFinalRef.current) {
+        console.log('[SpeechRecognition] Flushing remaining interim:', interim.substring(0, 50));
+        finalSegmentsRef.current.push(interim);
+        const fullTranscript = finalSegmentsRef.current.join(' ');
+        setFinalTranscript(fullTranscript);
+        setRawTranscript(fullTranscript);
+      }
+      latestInterimRef.current = '';
+      setInterimTranscript('');
+      
+      setIsListening(false);
+      pauseTrackerRef.current.stop();
+      setPauseMetrics(pauseTrackerRef.current.getMetrics());
+      
+      console.log('[SpeechRecognition] Stopped with', finalSegmentsRef.current.length, 'segments');
+    }, 150);
   }, []);
 
   // ==================== PUBLIC: abort ====================

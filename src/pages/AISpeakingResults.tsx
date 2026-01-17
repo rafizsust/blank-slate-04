@@ -12,6 +12,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import { ModelAnswersAccordion } from '@/components/speaking/ModelAnswersAccordion';
 import { useSpeakingEvaluationRealtime } from '@/hooks/useSpeakingEvaluationRealtime';
+import { AddToFlashcardButton } from '@/components/common/AddToFlashcardButton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Mic,
@@ -711,9 +712,9 @@ export default function AISpeakingResults() {
             <Alert className="mb-4 md:mb-6 border-warning/50 bg-warning/10">
               <Info className="h-4 w-4 text-warning" />
               <AlertDescription className="text-sm">
-                <strong>Text-Based Evaluation:</strong> This assessment was generated from browser speech recognition transcripts which might often provide wrong transcripts. 
-                Also, pronunciation scores are estimated from speech recognition patterns, not actual audio analysis. 
-                For more accurate pronunciation and fluency assessment, use <strong>Accuracy Mode</strong> which analyzes your actual audio recording.
+                <strong>Speed Mode Evaluation:</strong> This assessment was generated from browser speech recognition. 
+                Transcripts may contain inaccuracies, and pronunciation scores are <em>estimated</em> from recognition patterns rather than actual audio analysis. 
+                For the most accurate pronunciation, fluency, and grammar assessment, we recommend <strong>Accuracy Mode</strong> which analyzes your actual voice recording with advanced AI.
               </AlertDescription>
             </Alert>
           )}
@@ -992,127 +993,155 @@ export default function AISpeakingResults() {
 
             {/* Lexical Upgrades Table */}
             <TabsContent value="lexical" className="mt-6 space-y-6">
-              {/* Recognition Corrections Section - What We Heard */}
-              {report.recognition_corrections && report.recognition_corrections.length > 0 && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base md:text-lg">
-                      <AlertCircle className="w-5 h-5 text-warning" />
-                      What We Heard
-                    </CardTitle>
-                    <CardDescription>
-                      Speech recognition may have misheard these phrases. Here's what you likely intended.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b">
-                            <th className="text-left py-3 px-2 font-medium">As Captured</th>
-                            <th className="text-left py-3 px-2 font-medium">Likely Intended</th>
-                            <th className="text-left py-3 px-2 font-medium">Context</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {report.recognition_corrections.map((correction, i) => (
-                            <tr key={i} className="border-b last:border-0">
-                              <td className="py-3 px-2">
-                                <Badge variant="outline" className="bg-warning/10 text-warning-foreground border-warning/30">
-                                  {correction.captured}
-                                </Badge>
-                              </td>
-                              <td className="py-3 px-2">
-                                <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                                  {correction.intended}
-                                </Badge>
-                              </td>
-                              <td className="py-3 px-2 text-muted-foreground italic">
-                                "{correction.context}"
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
+              {(() => {
+                // Calculate target band label based on user's score - adaptive!
+                const getTargetBandLabel = (userBand: number): string => {
+                  if (userBand >= 8.0) return "Band 9";
+                  if (userBand >= 7.5) return "Band 8.5+";
+                  if (userBand >= 7.0) return "Band 8+";
+                  if (userBand >= 6.5) return "Band 7.5+";
+                  if (userBand >= 6.0) return "Band 7+";
+                  if (userBand >= 5.5) return "Band 6.5+";
+                  if (userBand >= 5.0) return "Band 6+";
+                  return "Band 5.5+";
+                };
+                
+                const targetBandLabel = getTargetBandLabel(report.overall_band);
+                
+                return (
+                  <>
+                    {/* Recognition Corrections Section - What We Heard */}
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base md:text-lg">
+                          <AlertCircle className="w-5 h-5 text-warning" />
+                          What We Heard
+                        </CardTitle>
+                        <CardDescription>
+                          Speech recognition may have misheard these phrases. Here's what you likely intended.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        {report.recognition_corrections && report.recognition_corrections.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="border-b">
+                                  <th className="text-left py-3 px-2 font-medium">As Captured</th>
+                                  <th className="text-left py-3 px-2 font-medium">Likely Intended</th>
+                                  <th className="text-left py-3 px-2 font-medium hidden md:table-cell">Context</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {report.recognition_corrections.map((correction, i) => (
+                                  <tr key={i} className="border-b last:border-0">
+                                    <td className="py-3 px-2">
+                                      <Badge variant="outline" className="bg-warning/10 text-warning-foreground border-warning/30">
+                                        {correction.captured}
+                                      </Badge>
+                                    </td>
+                                    <td className="py-3 px-2">
+                                      <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
+                                        {correction.intended}
+                                      </Badge>
+                                    </td>
+                                    <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell">
+                                      "{correction.context}"
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="text-center py-6 space-y-2">
+                            <CheckCircle2 className="w-10 h-10 text-success mx-auto" />
+                            <p className="text-sm text-muted-foreground">
+                              No recognition errors detected — your speech was clearly captured.
+                            </p>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
 
-              {/* Vocabulary Upgrades Section */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <ArrowUpRight className="w-5 h-5 text-primary" />
-                    Vocabulary Upgrades
-                  </CardTitle>
-                  <CardDescription>
-                    You used these phrases correctly. Here are higher-band alternatives to practice.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {(() => {
-                    // Use vocabulary_upgrades if available, otherwise fall back to lexical_upgrades
-                    const upgrades = report.vocabulary_upgrades && report.vocabulary_upgrades.length > 0
-                      ? report.vocabulary_upgrades
-                      : report.lexical_upgrades;
-                    
-                    // Calculate target band label based on user's score
-                    const getTargetBandLabel = (userBand: number): string => {
-                      if (userBand < 5) return "Band 5+";
-                      if (userBand < 5.5) return "Band 5.5+";
-                      if (userBand < 6) return "Band 6+";
-                      if (userBand < 6.5) return "Band 6.5+";
-                      if (userBand < 7) return "Band 7+";
-                      if (userBand < 7.5) return "Band 7.5+";
-                      return "Band 8+";
-                    };
-                    
-                    const targetBandLabel = getTargetBandLabel(report.overall_band);
-                    
-                    if (!upgrades || upgrades.length === 0) {
-                      return (
-                        <p className="text-muted-foreground text-center py-8">
-                          No vocabulary upgrades suggested - great vocabulary usage!
-                        </p>
-                      );
-                    }
-                    
-                    return (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b">
-                              <th className="text-left py-3 px-2 font-medium">Your Phrase</th>
-                              <th className="text-left py-3 px-2 font-medium">{targetBandLabel} Alternative</th>
-                              <th className="text-left py-3 px-2 font-medium">Context</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {upgrades.map((upgrade, i) => (
-                              <tr key={i} className="border-b last:border-0">
-                                <td className="py-3 px-2">
-                                  <Badge variant="outline" className="bg-muted text-foreground">
-                                    {upgrade.original}
-                                  </Badge>
-                                </td>
-                                <td className="py-3 px-2">
-                                  <Badge variant="outline" className="bg-success/10 text-success">
-                                    {upgrade.upgraded}
-                                  </Badge>
-                                </td>
-                                <td className="py-3 px-2 text-muted-foreground italic">
-                                  "{upgrade.context}"
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    );
-                  })()}
-                </CardContent>
-              </Card>
+                    {/* Vocabulary Upgrades Section */}
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <ArrowUpRight className="w-5 h-5 text-primary" />
+                          Vocabulary Upgrades
+                        </CardTitle>
+                        <CardDescription>
+                          You used these phrases correctly. Here are higher-band alternatives to practice.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        {(() => {
+                          // Use vocabulary_upgrades if available, otherwise fall back to lexical_upgrades
+                          const upgrades = report.vocabulary_upgrades && report.vocabulary_upgrades.length > 0
+                            ? report.vocabulary_upgrades
+                            : report.lexical_upgrades;
+                          
+                          if (!upgrades || upgrades.length === 0) {
+                            return (
+                              <div className="text-center py-6 space-y-2">
+                                <Sparkles className="w-10 h-10 text-primary mx-auto" />
+                                <p className="text-sm text-muted-foreground">
+                                  Excellent vocabulary usage!
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  Your word choice already demonstrates strong {targetBandLabel} proficiency.
+                                </p>
+                              </div>
+                            );
+                          }
+                          
+                          return (
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="border-b">
+                                    <th className="text-left py-3 px-2 font-medium">Your Phrase</th>
+                                    <th className="text-left py-3 px-2 font-medium">{targetBandLabel} Alternative</th>
+                                    <th className="text-left py-3 px-2 font-medium hidden md:table-cell">Context</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {upgrades.map((upgrade, i) => (
+                                    <tr key={i} className="border-b last:border-0">
+                                      <td className="py-3 px-2">
+                                        <Badge variant="outline" className="bg-muted text-foreground">
+                                          {upgrade.original}
+                                        </Badge>
+                                      </td>
+                                      <td className="py-3 px-2">
+                                        <div className="flex items-center gap-2">
+                                          <Badge variant="outline" className="bg-success/10 text-success">
+                                            {upgrade.upgraded}
+                                          </Badge>
+                                          <AddToFlashcardButton 
+                                            word={upgrade.upgraded} 
+                                            meaning={`Better alternative to "${upgrade.original}"`}
+                                            example={upgrade.context}
+                                            variant="icon"
+                                          />
+                                        </div>
+                                      </td>
+                                      <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell">
+                                        "{upgrade.context}"
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          );
+                        })()}
+                      </CardContent>
+                    </Card>
+                  </>
+                );
+              })()}
             </TabsContent>
 
             {/* Part-by-Part Analysis */}

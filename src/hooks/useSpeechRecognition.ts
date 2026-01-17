@@ -265,13 +265,12 @@ export function useSpeechRecognition(config: SpeechRecognitionConfig = {}) {
     }
   }, [createRecognition]);
 
-  // Stop listening
+  // Stop listening with grace period for late finals
   const stopListening = useCallback(() => {
     console.log('[SpeechRecognition] Stopping...');
     
-    // Set flags FIRST to prevent restart
+    // Set manual stop flag to prevent restart, but keep recording flag true briefly
     isManualStopRef.current = true;
-    isRecordingRef.current = false;
     
     // Clear watchdog
     if (watchdogTimerRef.current) {
@@ -279,7 +278,7 @@ export function useSpeechRecognition(config: SpeechRecognitionConfig = {}) {
       watchdogTimerRef.current = null;
     }
     
-    // Stop recognition
+    // Stop recognition - this triggers final results before onend
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -288,9 +287,13 @@ export function useSpeechRecognition(config: SpeechRecognitionConfig = {}) {
       }
     }
     
-    setIsListening(false);
-    instanceCountRef.current = 0;
-    console.log('[SpeechRecognition] Stopped');
+    // Give browser 150ms grace period for late final results
+    setTimeout(() => {
+      isRecordingRef.current = false;
+      setIsListening(false);
+      instanceCountRef.current = 0;
+      console.log('[SpeechRecognition] Stopped');
+    }, 150);
   }, []);
 
   // Abort (immediate stop)
