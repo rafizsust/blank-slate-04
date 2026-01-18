@@ -37,6 +37,8 @@ import {
   Timer,
   Upload,
   AudioLines,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -76,6 +78,28 @@ const DIFFICULTY_COLORS: Record<string, string> = {
   hard: 'bg-destructive/20 text-destructive border-destructive/30',
 };
 
+// SessionStorage key for timing data
+const TIMING_STORAGE_KEY = 'ai_practice_timing';
+
+// Load timing data from sessionStorage
+function loadTimingFromStorage(): Record<string, { totalTimeMs: number; timing: Record<string, number> }> {
+  try {
+    const stored = sessionStorage.getItem(TIMING_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch {
+    return {};
+  }
+}
+
+// Save timing data to sessionStorage
+function saveTimingToStorage(timing: Record<string, { totalTimeMs: number; timing: Record<string, number> }>) {
+  try {
+    sessionStorage.setItem(TIMING_STORAGE_KEY, JSON.stringify(timing));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 // Live elapsed time component for pending evaluations
 function LiveElapsedTime({ startTime }: { startTime: string }) {
   const [elapsed, setElapsed] = useState('');
@@ -113,6 +137,66 @@ function LiveElapsedTime({ startTime }: { startTime: string }) {
   );
 }
 
+// Timing breakdown component
+function TimingBreakdown({ 
+  timing, 
+  tracker 
+}: { 
+  timing?: { totalTimeMs: number; timing: Record<string, number> };
+  tracker?: SpeakingSubmissionTracker | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  
+  // Combine timing from completed result and/or tracker - normalize to Record<string, number>
+  const trackerTiming = tracker?.timing as Record<string, number> | undefined;
+  const displayTiming: Record<string, number> = timing?.timing || trackerTiming || {};
+  const totalMs = timing?.totalTimeMs || displayTiming.totalMs || 0;
+  
+  if (Object.keys(displayTiming).length === 0 && totalMs === 0) return null;
+  
+  const formatMs = (ms: number) => {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  };
+  
+  const stages = [
+    { key: 'conversionMs', label: 'Conversion', icon: AudioLines },
+    { key: 'uploadMs', label: 'Upload', icon: Upload },
+    { key: 'queueMs', label: 'Queue', icon: Clock },
+    { key: 'evaluationMs', label: 'Evaluation', icon: Zap },
+    { key: 'r2UploadMs', label: 'R2 Upload', icon: Upload },
+    { key: 'googleUploadMs', label: 'Google Upload', icon: Upload },
+    { key: 'saveResultMs', label: 'Save', icon: Target },
+  ].filter(s => displayTiming[s.key] !== undefined);
+  
+  if (stages.length === 0) return null;
+  
+  return (
+    <div className="mt-2">
+      <button
+        onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        <span>Timing breakdown</span>
+        {totalMs > 0 && <span className="text-success">({formatMs(totalMs)} total)</span>}
+      </button>
+      
+      {expanded && (
+        <div className="mt-2 pl-4 border-l-2 border-muted space-y-1">
+          {stages.map(({ key, label, icon: Icon }) => (
+            <div key={key} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Icon className="w-3 h-3" />
+              <span>{label}:</span>
+              <span className="text-foreground">{formatMs(displayTiming[key])}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AIPracticeHistory() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -132,6 +216,19 @@ export default function AIPracticeHistory() {
   const [pendingEvaluations, setPendingEvaluations] = useState<Map<string, PendingEvaluation>>(new Map());
   // Client-side tracker state for tests still uploading/converting (before DB job exists)
   const [clientTrackers, setClientTrackers] = useState<Map<string, SpeakingSubmissionTracker>>(new Map());
+  
+  // REF to track testResults for use in realtime callbacks (avoids stale closures)
+  const testResultsRef = useRef<Record<string, AIPracticeResult>>({});
+  useEffect(() => {
+    testResultsRef.current = testResults;
+  }, [testResults]);
+
+  // REF to track if realtime channels have been set up (prevent re-subscribe loops)
+  const channelsSetupRef = useRef(false);
+  const channelIdsRef = useRef<{ evalChannel: string | null; resultsChannel: string | null }>({
+    evalChannel: null,
+    resultsChannel: null,
+  });
 
   // Listen for client-side tracker updates (from test page still running in another tab or before navigation)
   useEffect(() => {
@@ -194,10 +291,7 @@ export default function AIPracticeHistory() {
       const aPending = pendingEvaluations.get(a.id);
       const bPending = pendingEvaluations.get(b.id);
       
-      // Get the most recent activity time for each test:
-      // 1. Pending evaluation job creation time (for retakes awaiting evaluation)
-      // 2. Result completion time (for completed tests)
-      // 3. Test generation time (for tests not yet attempted)
+      // Get the most recent activity time for each test
       const getActivityTime = (_testId: string, result: AIPracticeResult | undefined, pending: PendingEvaluation | undefined, generatedAt: string): number => {
         const times: number[] = [new Date(generatedAt).getTime()];
         
@@ -225,9 +319,9 @@ export default function AIPracticeHistory() {
     }
   }, [testResults, pendingEvaluations]);
 
-  // Realtime subscription for speaking evaluation jobs
+  // Realtime subscription for speaking evaluation jobs - setup ONCE per user session
   useEffect(() => {
-    if (!user) return;
+    if (!user || channelsSetupRef.current) return;
 
     const isNewer = (a: PendingEvaluation, b: PendingEvaluation) => {
       const ta = new Date(a.created_at).getTime();
@@ -241,8 +335,12 @@ export default function AIPracticeHistory() {
       return new Date(r.completed_at).getTime() >= new Date(jobCreatedAt).getTime();
     };
 
+    // Create unique channel ID for this session
+    const evalChannelId = `speaking-eval-history-${user.id}-${Date.now()}`;
+    channelIdsRef.current.evalChannel = evalChannelId;
+
     const channel = supabase
-      .channel('speaking-eval-history')
+      .channel(evalChannelId)
       .on(
         'postgres_changes',
         {
@@ -254,8 +352,6 @@ export default function AIPracticeHistory() {
         (payload: any) => {
           const job = payload.new as PendingEvaluation;
           if (!job) return;
-
-          console.log('[AIPracticeHistory] Evaluation job update:', job.status, job.test_id);
 
           // If the user already has a newer result saved, ignore late/stale failures from older attempts.
           if (job.status === 'failed' && hasNewerResult(job.test_id, job.created_at)) {
@@ -312,8 +408,6 @@ export default function AIPracticeHistory() {
             // Browser notification with navigation - use window.location for reliability
             const testResultsUrl = `/ai-practice/speaking/results/${job.test_id}`;
             notifyEvaluationComplete(undefined, () => {
-              console.log('[AIPracticeHistory] Notification clicked, navigating to:', testResultsUrl);
-              // Use window.location.href for more reliable navigation from notification context
               window.location.href = testResultsUrl;
             });
 
@@ -341,21 +435,29 @@ export default function AIPracticeHistory() {
           }
         }
       )
-      .subscribe((status) => {
-        console.log('[AIPracticeHistory] Realtime subscription:', status);
-      });
+      .subscribe();
+
+    // Mark channels as setup
+    channelsSetupRef.current = true;
 
     return () => {
       supabase.removeChannel(channel);
+      channelsSetupRef.current = false;
+      channelIdsRef.current.evalChannel = null;
     };
   }, [user, toast, navigate, notifyEvaluationComplete, notifyEvaluationFailed]);
 
   // Realtime subscription for ai_practice_results - instant updates when results are saved
   useEffect(() => {
     if (!user) return;
+    // Prevent re-subscribe if already set up for results channel
+    if (channelIdsRef.current.resultsChannel) return;
+
+    const resultsChannelId = `ai-practice-results-${user.id}-${Date.now()}`;
+    channelIdsRef.current.resultsChannel = resultsChannelId;
 
     const resultsChannel = supabase
-      .channel('ai-practice-results-realtime')
+      .channel(resultsChannelId)
       .on(
         'postgres_changes',
         {
@@ -367,8 +469,6 @@ export default function AIPracticeHistory() {
         (payload: any) => {
           const newResult = payload.new as AIPracticeResult;
           if (!newResult) return;
-
-          console.log('[AIPracticeHistory] New result received via realtime:', newResult.id, newResult.test_id);
 
           // Update testResults state immediately
           setTestResults((prev) => {
@@ -409,12 +509,11 @@ export default function AIPracticeHistory() {
           }
         }
       )
-      .subscribe((status) => {
-        console.log('[AIPracticeHistory] Results realtime subscription:', status);
-      });
+      .subscribe();
 
     return () => {
       supabase.removeChannel(resultsChannel);
+      channelIdsRef.current.resultsChannel = null;
     };
   }, [user, toast, navigate]);
 
@@ -550,9 +649,14 @@ export default function AIPracticeHistory() {
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
   
-  // Parallel mode resubmission state
+  // Parallel mode resubmission state - load from sessionStorage on mount
   const [parallelResubmitting, setParallelResubmitting] = useState<string | null>(null);
-  const [parallelTiming, setParallelTiming] = useState<Record<string, { totalTimeMs: number; timing: Record<string, number> }>>({});
+  const [parallelTiming, setParallelTiming] = useState<Record<string, { totalTimeMs: number; timing: Record<string, number> }>>(() => loadTimingFromStorage());
+
+  // Persist timing to sessionStorage whenever it changes
+  useEffect(() => {
+    saveTimingToStorage(parallelTiming);
+  }, [parallelTiming]);
 
   // Cancel a pending/processing speaking evaluation
   const handleCancelEvaluation = async (testId: string) => {
@@ -648,8 +752,6 @@ export default function AIPracticeHistory() {
     setParallelResubmitting(testId);
     const startTime = Date.now();
     
-    console.log(`[AIPracticeHistory] Starting parallel mode resubmission for test ${testId}`);
-    
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
@@ -675,14 +777,6 @@ export default function AIPracticeHistory() {
       const data = response.data;
       
       if (data?.success) {
-        console.log('[AIPracticeHistory] Parallel resubmission successful:', {
-          totalTimeMs: data.totalTimeMs,
-          clientElapsedMs: clientElapsed,
-          timing: data.timing,
-          band: data.overallBand,
-          model: data.model,
-        });
-
         setParallelTiming(prev => ({
           ...prev,
           [testId]: {
@@ -797,6 +891,34 @@ export default function AIPracticeHistory() {
       default:
         return formatQuestionType(type);
     }
+  };
+
+  // Helper function to get the "Last updated" time for a test
+  const getLastUpdatedTime = (
+    test: AIPracticeTest,
+    result: AIPracticeResult | undefined,
+    pending: PendingEvaluation | undefined,
+    tracker: SpeakingSubmissionTracker | null | undefined
+  ): Date => {
+    const times: number[] = [new Date(test.generated_at).getTime()];
+    
+    if (result?.completed_at) {
+      times.push(new Date(result.completed_at).getTime());
+    }
+    
+    if (pending?.created_at) {
+      times.push(new Date(pending.created_at).getTime());
+    }
+    
+    if (pending?.updated_at) {
+      times.push(new Date(pending.updated_at).getTime());
+    }
+    
+    if (tracker?.updatedAt) {
+      times.push(tracker.updatedAt);
+    }
+    
+    return new Date(Math.max(...times));
   };
 
   if (authLoading || loading) {
@@ -937,6 +1059,9 @@ export default function AIPracticeHistory() {
                 const clientTracker = test.module === 'speaking' ? clientTrackers.get(test.id) : null;
                 const isClientUploading = !!clientTracker && ['preparing', 'converting', 'uploading', 'queuing'].includes(clientTracker.stage);
                 
+                // Calculate last updated time
+                const lastUpdated = getLastUpdatedTime(test, result, pendingJob, clientTracker);
+                
                 return (
                   <Card 
                     key={test.id} 
@@ -1052,8 +1177,8 @@ export default function AIPracticeHistory() {
                               <Clock className="w-3 h-3" />
                               {test.time_minutes} min
                             </span>
-                            <span>
-                              {format(new Date(test.generated_at), 'MMM d, yyyy h:mm a')}
+                            <span title="Last updated">
+                              {format(lastUpdated, 'MMM d, yyyy h:mm a')}
                             </span>
                             {/* Processing time display */}
                             {hasResult && result?.completed_at && (
@@ -1061,7 +1186,6 @@ export default function AIPracticeHistory() {
                                 <Timer className="w-3 h-3" />
                                 {(() => {
                                   // Use result lifecycle timestamps (not test generation time).
-                                  // generated_at can be hours earlier than the actual attempt.
                                   const startedAt = new Date((result as any).created_at || result.completed_at).getTime();
                                   const completedAt = new Date(result.completed_at).getTime();
                                   const durationMs = Math.max(0, completedAt - startedAt);
@@ -1085,6 +1209,12 @@ export default function AIPracticeHistory() {
                               <LiveElapsedTime startTime={pendingJob.created_at} />
                             )}
                           </div>
+                          
+                          {/* Timing Breakdown */}
+                          <TimingBreakdown 
+                            timing={parallelTiming[test.id]} 
+                            tracker={clientTracker}
+                          />
                         </div>
                         
                         <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
