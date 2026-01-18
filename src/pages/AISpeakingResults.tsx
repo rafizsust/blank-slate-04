@@ -33,6 +33,7 @@ import {
   Info,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { computeSpeakingOverallBandFromCriteria } from '@/lib/ieltsBand';
 
 interface CriterionScore {
   score: number;
@@ -444,6 +445,15 @@ export default function AISpeakingResults() {
 
     const report = normalizeEvaluationReport(data.question_results);
 
+    // Compute overall band using IELTS rounding rules from the 4 criteria.
+    // This fixes cases like 5.5, 6.0, 5.5, 6.0 -> avg 5.75 -> 6.0.
+    const computedOverallBand = computeSpeakingOverallBandFromCriteria({
+      fluency: report.fluency_coherence.score,
+      lexical: report.lexical_resource.score,
+      grammar: report.grammatical_range.score,
+      pronunciation: report.pronunciation.score,
+    });
+
     // answers can be either:
     // 1) { audio_urls, transcripts_by_part, ... } (new)
     // 2) { [segmentKey]: r2Key } (legacy from early async save)
@@ -470,16 +480,20 @@ export default function AISpeakingResults() {
 
     // Check if this was a text-based evaluation (has transcripts in answers)
     const hasTextBasedTranscripts = Boolean(
-      data.answers && 
-      typeof data.answers === 'object' && 
-      (data.answers as any).transcripts && 
+      data.answers &&
+      typeof data.answers === 'object' &&
+      (data.answers as any).transcripts &&
       Object.keys((data.answers as any).transcripts).length > 0
     );
+
+    // Prefer computed value for display; keep stored band_score as fallback.
+    const overallBandToShow = computedOverallBand || data.band_score || report.overall_band || 0;
+    report.overall_band = overallBandToShow;
 
     setResult({
       id: data.id,
       test_id: data.test_id,
-      overall_band: data.band_score || report.overall_band || 0,
+      overall_band: overallBandToShow,
       evaluation_report: report,
       audio_urls: audioUrls,
       candidate_transcripts: {
