@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Navbar } from '@/components/Navbar';
 import { Footer } from '@/components/Footer';
@@ -144,7 +144,7 @@ export default function AIPracticeHistory() {
         if (key?.startsWith('speaking_submission_tracker:')) {
           const testId = key.replace('speaking_submission_tracker:', '');
           const tracker = getSpeakingSubmissionTracker(testId);
-          if (tracker && tracker.stage !== 'completed' && tracker.stage !== 'failed') {
+          if (tracker) {
             newTrackers.set(testId, tracker);
           }
         }
@@ -161,7 +161,7 @@ export default function AIPracticeHistory() {
       const { testId, tracker } = e.detail;
       setClientTrackers(prev => {
         const updated = new Map(prev);
-        if (!tracker || tracker.stage === 'completed' || tracker.stage === 'failed') {
+        if (!tracker) {
           updated.delete(testId);
         } else {
           updated.set(testId, tracker);
@@ -236,7 +236,7 @@ export default function AIPracticeHistory() {
     };
 
     const hasNewerResult = (testId: string, jobCreatedAt: string) => {
-      const r = testResults[testId];
+      const r = testResultsRef.current[testId];
       if (!r?.completed_at) return false;
       return new Date(r.completed_at).getTime() >= new Date(jobCreatedAt).getTime();
     };
@@ -348,7 +348,7 @@ export default function AIPracticeHistory() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user, toast, navigate, notifyEvaluationComplete, notifyEvaluationFailed, testResults]);
+  }, [user, toast, navigate, notifyEvaluationComplete, notifyEvaluationFailed]);
 
   // Realtime subscription for ai_practice_results - instant updates when results are saved
   useEffect(() => {
