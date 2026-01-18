@@ -14,6 +14,7 @@ import { ExitTestConfirmDialog } from '@/components/common/ExitTestConfirmDialog
 import { MicrophoneTest, AccentCode, EvaluationMode } from '@/components/speaking/MicrophoneTest';
 import { describeApiError } from '@/lib/apiErrors';
 import { supabase } from '@/integrations/supabase/client';
+import { patchSpeakingSubmissionTracker, clearSpeakingSubmissionTracker } from '@/lib/speakingSubmissionTracker';
 import {
   saveAllAudioSegments,
   deleteAudioSegments,
@@ -994,17 +995,28 @@ export default function AIPracticeSpeakingTest() {
   const endTest = () => {
     setTimeLeft(0);
     setPhase('ending');
+
+    // Start submission immediately after recordings are complete.
+    // We still play the ending audio for UX, but we do NOT wait for it to finish.
+    // This addresses the "why wait for audio to finish" issue.
+    try {
+      // Fire-and-forget; navigation happens inside submitTest.
+      void submitTest();
+    } catch {
+      // ignore
+    }
+
     speakText('Thank you. That is the end of the speaking test.', 'test_ending');
-    
+
     // Safety timeout: if TTS/audio fails and completion callback never fires,
     // auto-submit after 10 seconds to prevent getting stuck in 'ending' phase
     const safetyTimeout = window.setTimeout(() => {
-      if (phaseRef.current === 'ending' && isMountedRef.current && !exitRequestedRef.current) {
+      if (phaseRef.current === 'ending' && !exitRequestedRef.current) {
         console.warn('[AIPracticeSpeakingTest] Safety timeout triggered - submitting test after audio failure');
-        submitTest();
+        void submitTest();
       }
     }, 10000);
-    
+
     // Store timeout ID so it can be cleared if normal completion happens
     presetAudioTimersRef.current.endingSafety = safetyTimeout;
   };

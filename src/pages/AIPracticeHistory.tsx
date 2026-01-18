@@ -993,11 +993,12 @@ export default function AIPracticeHistory() {
                               <span className="flex items-center gap-1 text-success">
                                 <Timer className="w-3 h-3" />
                                 {(() => {
-                                  // Calculate processing time from test generation to result completion
-                                  const generatedAt = new Date(test.generated_at).getTime();
+                                  // Use result lifecycle timestamps (not test generation time).
+                                  // generated_at can be hours earlier than the actual attempt.
+                                  const startedAt = new Date((result as any).created_at || result.completed_at).getTime();
                                   const completedAt = new Date(result.completed_at).getTime();
-                                  const durationMs = completedAt - generatedAt;
-                                  
+                                  const durationMs = Math.max(0, completedAt - startedAt);
+
                                   if (durationMs < 60000) {
                                     return `${Math.round(durationMs / 1000)}s`;
                                   } else if (durationMs < 3600000) {
