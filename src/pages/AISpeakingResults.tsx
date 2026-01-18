@@ -394,7 +394,13 @@ export default function AISpeakingResults() {
     setAvailableParts(partsToShow);
 
     // Try to find the result in ai_practice_results
-    const { data, error } = await supabase
+    // The URL param can be either the test_id OR the result's own id (from parallel mode)
+    // First try by test_id, then fallback to id
+    let data = null;
+    let error = null;
+    
+    // Try by test_id first (most common case)
+    const { data: byTestId, error: errByTestId } = await supabase
       .from('ai_practice_results')
       .select('*')
       .eq('test_id', testId)
@@ -403,6 +409,25 @@ export default function AISpeakingResults() {
       .order('completed_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    
+    if (byTestId) {
+      data = byTestId;
+    } else {
+      // Fallback: maybe testId is actually the result's own id (from parallel mode redirect)
+      const { data: byResultId, error: errByResultId } = await supabase
+        .from('ai_practice_results')
+        .select('*')
+        .eq('id', testId)
+        .eq('user_id', user.id)
+        .eq('module', 'speaking')
+        .maybeSingle();
+      
+      if (byResultId) {
+        data = byResultId;
+      } else {
+        error = errByTestId || errByResultId;
+      }
+    }
 
     if (error) {
       console.error('Failed to load speaking results:', error);
