@@ -326,6 +326,66 @@ serve(async (req) => {
     const resubmitMode = evaluationMode || 'accuracy';
     console.log(`[resubmit-parallel] Re-queuing evaluation via evaluate-speaking-async (mode=${resubmitMode})`);
 
+    // IMPORTANT:
+    // Basic mode is *text-based* only when transcripts are provided. When resubmitting from History,
+    // we reconstruct per-question transcripts from the previous evaluation_report (modelAnswers[].candidateResponse)
+    // so "Accuracy → Basic" resubmits stay truly text-based.
+    let reconstructedTranscripts: Record<string, any> | undefined;
+
+    if (resubmitMode === 'basic') {
+      try {
+        const { data: lastSubmission } = await supabaseService
+          .from('speaking_submissions')
+          .select('evaluation_report')
+          .eq('test_id', testId)
+          .eq('user_id', user.id)
+          .order('submitted_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const report = lastSubmission?.evaluation_report as any;
+        const modelAnswers = Array.isArray(report?.modelAnswers) ? report.modelAnswers : [];
+
+        const transcriptsFromReport: Record<string, any> = {};
+        for (const a of modelAnswers) {
+          const segKey = String(a?.segment_key || '');
+          const candidateResponse = String(a?.candidateResponse || '').trim();
+          if (!segKey || !candidateResponse) continue;
+
+          transcriptsFromReport[segKey] = {
+            rawTranscript: candidateResponse,
+            cleanedTranscript: candidateResponse,
+            durationMs: Math.round((durations?.[segKey] || 0) * 1000),
+            // Optional metrics are left empty (processor tolerates missing fields).
+            fluencyMetrics: {
+              wordsPerMinute: 0,
+              pauseCount: 0,
+              fillerCount: 0,
+              fillerRatio: 0,
+              repetitionCount: 0,
+              overallFluencyScore: 0,
+            },
+            prosodyMetrics: {
+              pitchVariation: 0,
+              stressEventCount: 0,
+              rhythmConsistency: 0,
+            },
+            overallClarityScore: 0,
+            wordConfidences: [],
+          };
+        }
+
+        if (Object.keys(transcriptsFromReport).length > 0) {
+          reconstructedTranscripts = transcriptsFromReport;
+          console.log(`[resubmit-parallel] Reconstructed ${Object.keys(transcriptsFromReport).length} transcripts from last evaluation_report`);
+        } else {
+          console.warn('[resubmit-parallel] No candidateResponse transcripts found in last evaluation_report; basic-mode resubmit may fall back to audio');
+        }
+      } catch (e) {
+        console.warn('[resubmit-parallel] Failed to reconstruct transcripts for basic-mode resubmit:', e);
+      }
+    }
+
     const { data: asyncData, error: asyncErr } = await supabaseClient.functions.invoke('evaluate-speaking-async', {
       body: {
         testId,
@@ -336,8 +396,10 @@ serve(async (req) => {
         fluencyFlag,
         cancelExisting: true,
         evaluationMode: resubmitMode,
+        transcripts: resubmitMode === 'basic' ? reconstructedTranscripts : undefined,
       },
     });
+
 
     if (asyncErr) {
       console.error('[resubmit-parallel] Failed to queue async evaluation:', asyncErr);

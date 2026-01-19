@@ -200,17 +200,30 @@ export function InlineProgressBanner({
   isCancelling,
   className,
 }: InlineProgressBannerProps) {
-  const displayProgress = getProgressFromStage(stage, progress, currentPart, totalParts);
+  const calculatedProgress = getProgressFromStage(stage, progress, currentPart, totalParts);
   const stageLabel = getStageLabel(stage, currentPart);
-  
+
+  // Prevent the progress bar from "jumping backwards" when the backend stage briefly returns
+  // to a low-progress label (e.g., "queuing" between parts). Reset when the startTime changes.
+  const maxProgressRef = useState(() => ({ key: '', max: 0 }))[0];
+  const progressKey = startTime ? String(startTime) : '__no_start_time__';
+  if (maxProgressRef.key !== progressKey) {
+    maxProgressRef.key = progressKey;
+    maxProgressRef.max = 0;
+  }
+  maxProgressRef.max = Math.max(maxProgressRef.max, calculatedProgress);
+  const displayProgress = maxProgressRef.max;
+
   return (
-    <div className={cn(
-      "flex items-center gap-3 p-2 rounded-lg bg-primary/5 border border-primary/20",
-      className
-    )}>
+    <div
+      className={cn(
+        "flex items-center gap-3 p-2 rounded-lg bg-primary/5 border border-primary/20",
+        className
+      )}
+    >
       {/* Spinner */}
       <Loader2 className="w-4 h-4 animate-spin text-primary shrink-0" />
-      
+
       {/* Stage + Progress */}
       <div className="flex-1 min-w-0 space-y-1">
         <div className="flex items-center justify-between gap-2">
@@ -226,7 +239,7 @@ export function InlineProgressBanner({
         </div>
         <Progress value={displayProgress} className="h-1.5" />
       </div>
-      
+
       {/* Cancel button */}
       {onCancel && (
         <Button
@@ -250,3 +263,4 @@ export function InlineProgressBanner({
     </div>
   );
 }
+

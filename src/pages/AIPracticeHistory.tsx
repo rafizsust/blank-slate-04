@@ -677,17 +677,14 @@ export default function AIPracticeHistory() {
 
       const data = response.data;
       
-      // The resubmit-parallel function now queues the job asynchronously
-      // Navigate to results page to show real-time progress
+      // The resubmit-parallel function queues the job asynchronously.
+      // Stay on History and show progress in the card (no redirect).
       if (data?.queued || data?.success) {
         toast({
           title: 'Re-evaluation Queued',
-          description: 'Processing your speaking test. Redirecting to results...',
+          description: 'Tracking progress here in your history.',
         });
 
-        // Navigate to results page where the realtime hook will show progress
-        navigate(`/ai-practice/speaking/results/${testId}`);
-        
         // Reload tests to update state
         loadTests();
         loadPendingEvaluations();
