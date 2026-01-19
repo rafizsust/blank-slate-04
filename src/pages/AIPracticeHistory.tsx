@@ -272,6 +272,16 @@ export default function AIPracticeHistory() {
       const pendingMap = new Map<string, PendingEvaluation>();
       data?.forEach(job => {
         const existing = pendingMap.get(job.test_id);
+        // Only keep pending/failed jobs if there's no successful result that's newer
+        const resultForTest = testResultsRef.current[job.test_id];
+        const hasNewerSuccessResult = resultForTest && 
+          new Date(resultForTest.completed_at).getTime() >= new Date(job.created_at).getTime();
+        
+        // Skip failed jobs if we have a newer successful result
+        if (job.status === 'failed' && hasNewerSuccessResult) {
+          return;
+        }
+        
         if (!existing || new Date(job.created_at) > new Date(existing.created_at)) {
           pendingMap.set(job.test_id, job as PendingEvaluation);
         }
@@ -294,12 +304,6 @@ export default function AIPracticeHistory() {
   // Realtime subscription for speaking evaluation jobs
   useEffect(() => {
     if (!user || channelsSetupRef.current) return;
-
-    const isNewer = (a: PendingEvaluation, b: PendingEvaluation) => {
-      const ta = new Date(a.created_at).getTime();
-      const tb = new Date(b.created_at).getTime();
-      return ta >= tb;
-    };
 
     const hasNewerResult = (testId: string, jobCreatedAt: string) => {
       const r = testResultsRef.current[testId];
@@ -342,7 +346,13 @@ export default function AIPracticeHistory() {
 
           setPendingEvaluations((prev) => {
             const existing = prev.get(job.test_id);
-            if (existing && !isNewer(job, existing)) {
+            
+            // Use updated_at for comparison when status changes to processing (timer reset)
+            const jobTime = job.updated_at ? new Date(job.updated_at).getTime() : new Date(job.created_at).getTime();
+            const existingTime = existing?.updated_at ? new Date(existing.updated_at).getTime() : existing ? new Date(existing.created_at).getTime() : 0;
+            
+            // Only skip if existing is truly newer
+            if (existing && existingTime > jobTime) {
               return prev;
             }
 
@@ -351,7 +361,13 @@ export default function AIPracticeHistory() {
             if (job.status === 'completed') {
               updated.delete(job.test_id);
             } else {
-              updated.set(job.test_id, job as PendingEvaluation);
+              // Reset the timer reference by using the job's updated_at when status changes to processing
+              const updatedJob = { ...job };
+              if (job.status === 'processing' && existing?.status !== 'processing') {
+                // Status changed to processing - this is a retry/restart, use updated_at as start time
+                updatedJob.created_at = job.updated_at || job.created_at;
+              }
+              updated.set(job.test_id, updatedJob as PendingEvaluation);
             }
 
             return updated;
@@ -595,9 +611,10 @@ export default function AIPracticeHistory() {
         return;
       }
 
+      // Just show that we started - actual progress will come from realtime
       toast({
         title: 'Re-evaluation Started',
-        description: 'Re-evaluating your speaking test... This may take a few minutes.',
+        description: 'Processing your speaking test...',
       });
 
       const response = await supabase.functions.invoke('resubmit-parallel', {
@@ -612,12 +629,13 @@ export default function AIPracticeHistory() {
       
       if (data?.success) {
         toast({
-          title: `✅ Re-evaluation Complete!`,
-          description: `Band ${data.overallBand?.toFixed(1)} - Evaluation took ${formatDuration(data.totalTimeMs)}`,
+          title: '🎉 Re-evaluation Complete!',
+          description: `Band ${data.overallBand?.toFixed(1)} - Took ${formatDuration(data.totalTimeMs || 0)}`,
         });
 
         // Reload tests to show updated results
         loadTests();
+        loadPendingEvaluations();
       } else if (data?.error) {
         throw new Error(data.error);
       }
@@ -691,9 +709,32 @@ export default function AIPracticeHistory() {
     }
   };
 
-  const filteredTests = activeModule === 'all' 
+  // Sort tests by most recent activity (result completion, pending job, or test generation)
+  const filteredTests = (activeModule === 'all' 
     ? tests 
-    : tests.filter(t => t.module === activeModule);
+    : tests.filter(t => t.module === activeModule))
+    .sort((a, b) => {
+      // Get most recent activity time for each test
+      const getLastActivityTime = (test: AIPracticeTest) => {
+        const result = testResults[test.id];
+        const pendingJob = pendingEvaluations.get(test.id);
+        
+        const times = [new Date(test.generated_at).getTime()];
+        if (result?.completed_at) {
+          times.push(new Date(result.completed_at).getTime());
+        }
+        if (pendingJob?.created_at) {
+          times.push(new Date(pendingJob.created_at).getTime());
+        }
+        if (pendingJob?.updated_at) {
+          times.push(new Date(pendingJob.updated_at).getTime());
+        }
+        
+        return Math.max(...times);
+      };
+      
+      return getLastActivityTime(b) - getLastActivityTime(a);
+    });
 
   const formatQuestionType = (type: string) => {
     return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -974,9 +1015,9 @@ export default function AIPracticeHistory() {
                                   </span>
                                 )}
                                 
-                                {/* Live elapsed time for pending evaluations */}
+                                {/* Live elapsed time for pending evaluations - use updated_at for retries */}
                                 {isEvaluating && pendingJob && (
-                                  <LiveElapsedTime startTime={pendingJob.created_at} />
+                                  <LiveElapsedTime startTime={pendingJob.updated_at || pendingJob.created_at} />
                                 )}
                               </div>
                               
@@ -988,7 +1029,7 @@ export default function AIPracticeHistory() {
                                     currentPart={pendingJob?.current_part}
                                     totalParts={pendingJob?.total_parts}
                                     progress={pendingJob?.progress}
-                                    startTime={isEvaluating && pendingJob ? pendingJob.created_at : clientTracker?.startedAt ? new Date(clientTracker.startedAt).toISOString() : undefined}
+                                    startTime={isEvaluating && pendingJob ? (pendingJob.updated_at || pendingJob.created_at) : clientTracker?.startedAt ? new Date(clientTracker.startedAt).toISOString() : undefined}
                                     mode={clientTracker?.mode}
                                     onCancel={pendingJob && ['pending', 'processing', 'retrying'].includes(pendingJob.status) ? () => handleCancelEvaluation(test.id) : undefined}
                                     isCancelling={cancellingJobId === pendingJob?.id || cancellingJobId === test.id}

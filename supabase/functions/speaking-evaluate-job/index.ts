@@ -671,17 +671,17 @@ serve(async (req) => {
       })
       .eq('id', jobId);
 
-    // Cleanup stale jobs for same test
+    // Cleanup stale/failed jobs for same test
     const { data: staleJobs } = await supabaseService
       .from('speaking_evaluation_jobs')
       .select('id')
       .eq('test_id', test_id)
       .eq('user_id', userId)
       .neq('id', jobId)
-      .in('status', ['pending', 'processing']);
+      .in('status', ['pending', 'processing', 'failed', 'stale']);
 
     if (staleJobs && staleJobs.length > 0) {
-      console.log(`[speaking-evaluate-job] Cancelling ${staleJobs.length} stale jobs`);
+      console.log(`[speaking-evaluate-job] Cancelling ${staleJobs.length} stale/failed jobs`);
       await supabaseService
         .from('speaking_evaluation_jobs')
         .update({
@@ -695,7 +695,7 @@ serve(async (req) => {
         .eq('test_id', test_id)
         .eq('user_id', userId)
         .neq('id', jobId)
-        .in('status', ['pending', 'processing']);
+        .in('status', ['pending', 'processing', 'failed', 'stale']);
     }
 
     console.log(`[speaking-evaluate-job] Complete, band: ${overallBand}, result_id: ${resultRow?.id}`);

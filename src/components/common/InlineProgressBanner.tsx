@@ -73,11 +73,8 @@ function LiveElapsedTime({ startTime }: { startTime: string }) {
   );
 }
 
-// Get stage label for display
-function getStageLabel(stage: string | null | undefined, currentPart?: number, totalParts?: number): string {
-  const parts = totalParts && totalParts > 0 ? totalParts : 3;
-  const partLabel = (p: number) => `Part ${p}/${parts}`;
-
+// Get stage label for display - WITHOUT "of X" suffix per user request
+function getStageLabel(stage: string | null | undefined, currentPart?: number): string {
   if (!stage) return 'Processing...';
 
   switch (stage) {
@@ -97,11 +94,11 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number, t
     case 'evaluating_text':
     case 'evaluating':
     case 'evaluating_part_1':
-      return `Evaluating ${partLabel(currentPart && currentPart > 0 ? currentPart : 1)}`;
+      return `Evaluating Part ${currentPart && currentPart > 0 ? currentPart : 1}`;
     case 'evaluating_part_2':
-      return `Evaluating ${partLabel(2)}`;
+      return 'Evaluating Part 2';
     case 'evaluating_part_3':
-      return `Evaluating ${partLabel(3)}`;
+      return 'Evaluating Part 3';
     case 'generating_feedback':
     case 'generating':
       return 'Generating feedback';
@@ -151,7 +148,8 @@ function getProgressFromStage(stage: string | null | undefined, progress?: numbe
 export function InlineProgressBanner({
   stage,
   currentPart,
-  totalParts,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  totalParts: _totalParts,
   progress,
   startTime,
   mode,
@@ -160,7 +158,7 @@ export function InlineProgressBanner({
   className,
 }: InlineProgressBannerProps) {
   const displayProgress = getProgressFromStage(stage, progress);
-  const stageLabel = getStageLabel(stage, currentPart, totalParts);
+  const stageLabel = getStageLabel(stage, currentPart);
   
   return (
     <div className={cn(
