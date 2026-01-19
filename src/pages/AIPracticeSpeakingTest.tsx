@@ -1035,16 +1035,28 @@ export default function AIPracticeSpeakingTest() {
 
 
   const submitTest = async () => {
-    // For accuracy mode, set background flag FIRST so checks below can use it
-    // This allows submission to complete even after navigation
-    const isBackgroundSubmission = evaluationMode === 'accuracy';
-    if (isBackgroundSubmission) {
-      backgroundSubmissionActiveRef.current = true;
-    }
-    
-    // Only abort if exit was explicitly requested - for accuracy mode, allow unmounted submission
+    // Always allow submission to continue after we navigate away to History.
+    backgroundSubmissionActiveRef.current = true;
+
+    // Only abort if exit was explicitly requested
     if (exitRequestedRef.current) return;
-    if (!isBackgroundSubmission && !isMountedRef.current) return;
+
+    // Make all UI updates "safe" so background submission doesn't set state on an unmounted component.
+    const safeSetPhase = (next: TestPhase) => {
+      if (isMountedRef.current) setPhase(next);
+    };
+    const safeSetEvaluationStep = (next: number) => {
+      if (isMountedRef.current) setEvaluationStep(next);
+    };
+    const safeSetFailedUploads = (next: Array<{ key: string; error: string }>) => {
+      if (isMountedRef.current) setFailedUploads(next);
+    };
+    const safeSetSubmissionProgress = (next: { step: string; detail: string; currentItem: number; totalItems: number }) => {
+      if (isMountedRef.current) setSubmissionProgress(next);
+    };
+    const safeToast = (args: Parameters<typeof toast>[0]) => {
+      if (isMountedRef.current) toast(args);
+    };
 
     // Clear safety timer to prevent double submission
     if (presetAudioTimersRef.current.endingSafety) {
@@ -1057,17 +1069,22 @@ export default function AIPracticeSpeakingTest() {
       console.log('[AIPracticeSpeakingTest] submitTest: Already submitting or done, skipping');
       return;
     }
-    
-    // Only set submitting phase for BASIC mode
-    // ACCURACY mode navigates immediately and shows progress on History page (no overlay flash)
-    if (evaluationMode !== 'accuracy') {
-      setPhase('submitting');
+
+    // We no longer show the in-page "ProcessingCardSkeleton" flow.
+    // After any speaking submission (fresh / retry / restart), go straight to History.
+    safeSetPhase('done');
+
+    if (!exitRequestedRef.current) {
+      // Stop any audio/TTS and exit fullscreen best-effort.
+      stopPromptAudio();
+      void exitFullscreen();
+      navigate('/ai-practice/history');
     }
-    
-    setEvaluationStep(0);
-    setFailedUploads([]); // Reset failed uploads on new submission attempt
-    setSubmissionProgress({ step: 'Preparing', detail: 'Getting ready to process your recordings...', currentItem: 0, totalItems: 0 });
-    
+
+    safeSetEvaluationStep(0);
+    safeSetFailedUploads([]); // Reset failed uploads on new submission attempt
+    safeSetSubmissionProgress({ step: 'Preparing', detail: 'Getting ready to process your recordings...', currentItem: 0, totalItems: 0 });
+
     // Initialize client-side submission tracker for History page progress display
     if (testId) {
       patchSpeakingSubmissionTracker(testId, {
