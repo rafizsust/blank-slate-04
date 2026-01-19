@@ -27,7 +27,8 @@ const MAX_CONCURRENT_JOBS_PER_USER = 1;
 
 interface EvaluationRequest {
   testId: string;
-  filePaths: Record<string, string>;
+  // Optional for text-based (basic) evaluation; required for audio-based (accuracy) evaluation
+  filePaths?: Record<string, string>;
   durations?: Record<string, number>;
   topic?: string;
   difficulty?: string;
@@ -75,27 +76,56 @@ serve(async (req) => {
     }
 
     const body: EvaluationRequest = await req.json();
-    const { testId, filePaths, durations, topic, difficulty, fluencyFlag, retryJobId, cancelExisting, transcripts, evaluationMode } = body;
+    const {
+      testId,
+      filePaths,
+      durations,
+      topic,
+      difficulty,
+      fluencyFlag,
+      retryJobId,
+      cancelExisting,
+      transcripts,
+      evaluationMode,
+    } = body;
 
     // Determine evaluation path based on mode
     // 'accuracy' mode forces audio-based evaluation (uses more AI tokens but more accurate)
     // 'basic' mode uses text-based evaluation if transcripts are available
     const useAudioEvaluation = evaluationMode === 'accuracy';
-    const hasTranscripts = transcripts && Object.keys(transcripts).length > 0;
-    
-    console.log(`[evaluate-speaking-async] Mode: ${evaluationMode || 'basic'}, hasTranscripts: ${hasTranscripts}, useAudioEvaluation: ${useAudioEvaluation}`);
-    
-    if (hasTranscripts && !useAudioEvaluation) {
-      console.log(`[evaluate-speaking-async] Text-based evaluation available with ${Object.keys(transcripts).length} segments`);
-    } else if (useAudioEvaluation) {
-      console.log(`[evaluate-speaking-async] Audio-based evaluation requested (accuracy mode)`);
-    }
+    const hasTranscripts = Boolean(transcripts) && Object.keys(transcripts || {}).length > 0;
 
-    if (!testId || !filePaths || Object.keys(filePaths).length === 0) {
-      return new Response(JSON.stringify({ error: 'Missing testId or filePaths' }), {
+    const normalizedFilePaths: Record<string, string> =
+      filePaths && typeof filePaths === 'object' ? (filePaths as Record<string, string>) : {};
+
+    console.log(
+      `[evaluate-speaking-async] Mode: ${evaluationMode || 'basic'}, hasTranscripts: ${hasTranscripts}, useAudioEvaluation: ${useAudioEvaluation}, filePaths: ${Object.keys(normalizedFilePaths).length}`,
+    );
+
+    // Validation rules:
+    // - testId is always required
+    // - filePaths are required ONLY when we will do audio-based evaluation
+    if (!testId) {
+      return new Response(JSON.stringify({ error: 'Missing testId' }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    const requiresAudioFiles = useAudioEvaluation || !hasTranscripts;
+    if (requiresAudioFiles && Object.keys(normalizedFilePaths).length === 0) {
+      return new Response(JSON.stringify({ error: 'Missing filePaths for audio evaluation' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (hasTranscripts && !useAudioEvaluation) {
+      console.log(
+        `[evaluate-speaking-async] Text-based evaluation available with ${Object.keys(transcripts || {}).length} segments`,
+      );
+    } else if (useAudioEvaluation) {
+      console.log(`[evaluate-speaking-async] Audio-based evaluation requested (accuracy mode)`);
     }
 
     let job: any;
@@ -132,9 +162,8 @@ serve(async (req) => {
 
       job = existingJob;
     } else {
-      console.log(`[evaluate-speaking-async] Creating new job for test ${testId}, ${Object.keys(filePaths).length} files`);
+      console.log(`[evaluate-speaking-async] Creating new job for test ${testId}, ${Object.keys(normalizedFilePaths).length} files`);
 
-      // Check per-user concurrency limit (BEFORE cancelling anything)
       const { data: activeJobs, error: activeError } = await supabaseService
         .from('speaking_evaluation_jobs')
         .select('id, status, stage, test_id, created_at')
@@ -197,7 +226,7 @@ serve(async (req) => {
           test_id: testId,
           status: 'pending',
           stage,
-          file_paths: filePaths,
+          file_paths: normalizedFilePaths,
           durations: durations || {},
           topic,
           difficulty,
