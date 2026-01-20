@@ -8,6 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
  * 1. Finds stuck jobs (stale heartbeat or expired lock)
  * 2. Resets them for retry
  * 3. Dispatches pending jobs to the correct stage function
+ * 4. Routes to Groq or Gemini based on provider settings
  * 
  * Can be called:
  * - Periodically via cron (every 1-2 minutes)
@@ -23,7 +24,6 @@ const corsHeaders = {
 };
 
 // How old a heartbeat can be before we consider the job stuck (in seconds)
-// Reduced from 120s to 90s for faster recovery
 const STALE_HEARTBEAT_SECONDS = 90;
 
 // Maximum jobs to process per run
@@ -55,12 +55,24 @@ serve(async (req) => {
       errors: [] as string[],
     };
 
+    // Get current provider settings
+    const { data: providerSettings } = await supabaseService
+      .from('speaking_evaluation_settings')
+      .select('provider, auto_fallback_enabled')
+      .limit(1)
+      .maybeSingle();
+
+    const currentProvider = providerSettings?.provider || 'gemini';
+    const autoFallback = providerSettings?.auto_fallback_enabled ?? true;
+    
+    console.log(`[speaking-job-runner] Current provider: ${currentProvider}, auto-fallback: ${autoFallback}`);
+
     // Step 1: Find and reset stuck jobs
     const staleTime = new Date(Date.now() - STALE_HEARTBEAT_SECONDS * 1000).toISOString();
     
     let stuckJobsQuery = supabaseService
       .from('speaking_evaluation_jobs')
-      .select('id, status, stage, retry_count, max_retries, heartbeat_at, lock_expires_at')
+      .select('id, status, stage, retry_count, max_retries, heartbeat_at, lock_expires_at, provider')
       .eq('status', 'processing')
       .or(`heartbeat_at.lt.${staleTime},heartbeat_at.is.null,lock_expires_at.lt.${new Date().toISOString()}`);
 
@@ -78,32 +90,63 @@ serve(async (req) => {
       for (const job of stuckJobs) {
         const retryCount = (job.retry_count || 0) + 1;
         const maxRetries = job.max_retries || 3;
+        const jobProvider = job.provider || 'gemini';
 
-        // Determine which stage to reset to
+        // Determine which stage to reset to based on provider
         let newStage = 'pending_upload';
-        if (job.stage === 'evaluating' || job.stage === 'pending_eval') {
-          newStage = 'pending_eval';
-        }
-        if (job.stage === 'pending_text_eval' || job.stage === 'evaluating_text') {
-          newStage = 'pending_text_eval';
+        
+        if (jobProvider === 'groq') {
+          // Groq stages
+          if (job.stage === 'groq_evaluating' || job.stage === 'pending_groq_eval') {
+            newStage = 'pending_groq_eval';
+          } else if (job.stage === 'transcribing' || job.stage === 'pending_transcription') {
+            newStage = 'pending_transcription';
+          }
+        } else {
+          // Gemini stages
+          if (job.stage === 'evaluating' || job.stage === 'pending_eval') {
+            newStage = 'pending_eval';
+          }
+          if (job.stage === 'pending_text_eval' || job.stage === 'evaluating_text') {
+            newStage = 'pending_text_eval';
+          }
         }
 
         if (retryCount >= maxRetries && !forceRetry) {
-          // Mark as failed
-          await supabaseService
-            .from('speaking_evaluation_jobs')
-            .update({
-              status: 'failed',
-              stage: 'failed',
-              last_error: `Watchdog: Job stuck in ${job.stage} stage after ${retryCount} attempts`,
-              retry_count: retryCount,
-              lock_token: null,
-              lock_expires_at: null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', job.id);
-          
-          console.log(`[speaking-job-runner] Job ${job.id} marked as failed (max retries)`);
+          // Check if we should fallback to Gemini for Groq jobs
+          if (jobProvider === 'groq' && autoFallback) {
+            console.log(`[speaking-job-runner] Job ${job.id} Groq failed, falling back to Gemini`);
+            await supabaseService
+              .from('speaking_evaluation_jobs')
+              .update({
+                status: 'pending',
+                stage: 'pending_upload',
+                provider: 'gemini',
+                last_error: `Groq failed after ${retryCount} attempts, falling back to Gemini`,
+                retry_count: 0, // Reset retry count for Gemini
+                lock_token: null,
+                lock_expires_at: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', job.id);
+            results.stuckJobsReset++;
+          } else {
+            // Mark as failed
+            await supabaseService
+              .from('speaking_evaluation_jobs')
+              .update({
+                status: 'failed',
+                stage: 'failed',
+                last_error: `Watchdog: Job stuck in ${job.stage} stage after ${retryCount} attempts`,
+                retry_count: retryCount,
+                lock_token: null,
+                lock_expires_at: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', job.id);
+            
+            console.log(`[speaking-job-runner] Job ${job.id} marked as failed (max retries)`);
+          }
         } else {
           // Reset for retry
           await supabaseService
@@ -127,12 +170,20 @@ serve(async (req) => {
     }
 
     // Step 2: Dispatch pending jobs to appropriate stage functions
-    // This is a safety net - jobs should normally be triggered directly by the previous stage
+    // Include both Gemini and Groq stages
+    const allPendingStages = [
+      'pending_upload', 
+      'pending_eval', 
+      'pending_text_eval',
+      'pending_transcription',
+      'pending_groq_eval'
+    ];
+    
     let pendingQuery = supabaseService
       .from('speaking_evaluation_jobs')
-      .select('id, stage, google_file_uris, created_at, partial_results')
+      .select('id, stage, google_file_uris, created_at, partial_results, provider, transcription_result')
       .eq('status', 'pending')
-      .in('stage', ['pending_upload', 'pending_eval', 'pending_text_eval'])
+      .in('stage', allPendingStages)
       .order('created_at', { ascending: true });
 
     if (specificJobId) {
@@ -148,31 +199,51 @@ serve(async (req) => {
 
       for (const job of pendingJobs) {
         try {
-          // Determine which function to call based on stage
+          const jobProvider = job.provider || 'gemini';
           let functionName: string;
           
-          if (job.stage === 'pending_text_eval') {
-            // Text-based evaluation (browser transcripts available) - use process-speaking-job
-            functionName = 'process-speaking-job';
-          } else if (job.stage === 'pending_upload') {
-            // Check if uploads already exist (idempotency)
-            if (job.google_file_uris && Object.keys(job.google_file_uris).length > 0) {
-              // Uploads exist, advance to eval stage
-              await supabaseService
-                .from('speaking_evaluation_jobs')
-                .update({ stage: 'pending_eval', updated_at: new Date().toISOString() })
-                .eq('id', job.id);
-              functionName = 'speaking-evaluate-job';
+          // Route based on provider and stage
+          if (jobProvider === 'groq') {
+            // Groq pipeline
+            if (job.stage === 'pending_transcription') {
+              functionName = 'groq-speaking-transcribe';
+            } else if (job.stage === 'pending_groq_eval') {
+              // Check if transcription exists
+              if (job.transcription_result) {
+                functionName = 'groq-speaking-evaluate';
+              } else {
+                // Need transcription first
+                await supabaseService
+                  .from('speaking_evaluation_jobs')
+                  .update({ stage: 'pending_transcription', updated_at: new Date().toISOString() })
+                  .eq('id', job.id);
+                functionName = 'groq-speaking-transcribe';
+              }
             } else {
-              functionName = 'speaking-upload-job';
+              // Default to transcription for Groq
+              functionName = 'groq-speaking-transcribe';
             }
           } else {
-            functionName = 'speaking-evaluate-job';
+            // Gemini pipeline (existing logic)
+            if (job.stage === 'pending_text_eval') {
+              functionName = 'process-speaking-job';
+            } else if (job.stage === 'pending_upload') {
+              if (job.google_file_uris && Object.keys(job.google_file_uris).length > 0) {
+                await supabaseService
+                  .from('speaking_evaluation_jobs')
+                  .update({ stage: 'pending_eval', updated_at: new Date().toISOString() })
+                  .eq('id', job.id);
+                functionName = 'speaking-evaluate-job';
+              } else {
+                functionName = 'speaking-upload-job';
+              }
+            } else {
+              functionName = 'speaking-evaluate-job';
+            }
           }
 
-          console.log(`[speaking-job-runner] Dispatching job ${job.id} to ${functionName}`);
+          console.log(`[speaking-job-runner] Dispatching job ${job.id} (${jobProvider}) to ${functionName}`);
 
-          // Use EdgeRuntime.waitUntil if available for reliable background dispatch
           const dispatchJob = async () => {
             const functionUrl = `${supabaseUrl}/functions/v1/${functionName}`;
             
@@ -200,12 +271,11 @@ serve(async (req) => {
               }
               
               if (attempt < 3) {
-                await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
+                await new Promise(r => setTimeout(r, 2000));
               }
             }
           };
 
-          // Fire dispatch - use waitUntil if available for reliability
           if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
             EdgeRuntime.waitUntil(dispatchJob());
           } else {
@@ -224,6 +294,7 @@ serve(async (req) => {
 
     return new Response(JSON.stringify({
       success: true,
+      currentProvider,
       ...results,
     }), {
       status: 200,
