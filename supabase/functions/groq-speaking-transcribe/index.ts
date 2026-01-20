@@ -474,26 +474,23 @@ async function transcribeWithWhisper(
   const formData = new FormData();
   formData.append('file', audioBlob, `audio.${fileExtension}`);
   
-  // Switch to Distil-Whisper for better hallucination handling
-  // Distil-Whisper is 6x faster and more robust against silence-induced hallucinations
-  formData.append('model', 'distil-whisper-large-v3-en');
+  // Use whisper-large-v3-turbo - recommended replacement after distil-whisper deprecation
+  // Offers good balance of speed and accuracy with free tier support
+  formData.append('model', 'whisper-large-v3-turbo');
   formData.append('response_format', 'verbose_json');
   formData.append('timestamp_granularities[]', 'word');
   formData.append('timestamp_granularities[]', 'segment');
   formData.append('language', 'en');
   formData.append('temperature', '0');  // Reduce randomness to minimize hallucinations
   
-  // Enhanced prompt specifically tuned for Distil-Whisper to prevent hallucinations
-  // Distil-Whisper is English-only so we can be more specific
+  // Enhanced prompt for whisper-large-v3-turbo to prevent hallucinations during pauses
   formData.append('prompt', 
-    'IELTS speaking test. English only. ' +
+    'IELTS speaking test interview. English language. ' +
     'Transcribe exactly what is spoken - nothing more. ' +
-    'Silence means no output for that period. ' +
     'Include filler words: um, uh, like, you know. ' +
-    'Do NOT add: thank you, thanks for watching, goodbye, subscribe, Melanie, or any closing phrases. ' +
-    'Do NOT hallucinate words during pauses or silence. ' +
-    'If unclear, mark as [INAUDIBLE]. ' +
-    'Absolute silence = empty text.'
+    'Do NOT add: thank you, thanks for watching, goodbye, subscribe, or any closing phrases. ' +
+    'Silence or pauses should produce no text. ' +
+    'If speech is unclear, use [INAUDIBLE].'
   );
 
   const response = await fetch(GROQ_API_URL, {
