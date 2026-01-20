@@ -426,7 +426,7 @@ serve(async (req) => {
       transcripts_by_question: transcriptsByQuestion,
       evaluationMetadata: {
         provider: 'groq',
-        sttModel: 'distil-whisper-large-v3-en',
+        sttModel: 'whisper-large-v3-turbo',
         llmModel: GROQ_LLM_MODEL,
         pronunciationEstimation: pronunciationEstimate,
         processingTimeMs: processingTime,
