@@ -26,9 +26,9 @@ const corsHeaders = {
 
 const GROQ_LLM_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// DeepSeek R1 Distill Llama 70B - 128K context, excellent reasoning, free tier
-// Much better for structured output and following strict instructions
-const GROQ_LLM_MODEL = 'deepseek-r1-distill-llama-70b';
+// Llama 3.3 70B Versatile - 128K context, excellent reasoning, free tier
+// Recommended replacement after DeepSeek deprecation
+const GROQ_LLM_MODEL = 'llama-3.3-70b-versatile';
 
 async function callGroqLLMWithTokenFallback(opts: {
   apiKey: string;
