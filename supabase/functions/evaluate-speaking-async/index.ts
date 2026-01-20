@@ -209,15 +209,33 @@ serve(async (req) => {
           .in('status', ['pending', 'processing']);
       }
 
-      // Create new job record with staged processing
-      // - 'accuracy' mode: always use audio-based evaluation (pending_upload)
-      // - 'basic' mode with transcripts: use text-based evaluation (pending_text_eval)
-      // - 'basic' mode without transcripts: fall back to audio evaluation (pending_upload)
-      const stage = useAudioEvaluation 
-        ? 'pending_upload'  // Force audio upload for accuracy mode
-        : (hasTranscripts ? 'pending_text_eval' : 'pending_upload');
+      // Get current provider settings
+      const { data: providerSettings } = await supabaseService
+        .from('speaking_evaluation_settings')
+        .select('provider')
+        .limit(1)
+        .maybeSingle();
       
-      console.log(`[evaluate-speaking-async] Creating job with stage: ${stage}`);
+      const currentProvider = providerSettings?.provider || 'gemini';
+      
+      // Create new job record with staged processing
+      // - 'accuracy' mode: always use audio-based evaluation
+      // - 'basic' mode with transcripts: use text-based evaluation (pending_text_eval)
+      // - 'basic' mode without transcripts: fall back to audio evaluation
+      let stage: string;
+      
+      if (!useAudioEvaluation && hasTranscripts) {
+        // Text-based evaluation (same for both providers)
+        stage = 'pending_text_eval';
+      } else if (currentProvider === 'groq') {
+        // Groq audio evaluation starts with transcription
+        stage = 'pending_transcription';
+      } else {
+        // Gemini audio evaluation starts with upload
+        stage = 'pending_upload';
+      }
+      
+      console.log(`[evaluate-speaking-async] Creating job with provider: ${currentProvider}, stage: ${stage}`);
       
       // CRITICAL: ALWAYS store browser transcripts (if provided) as fallback for accuracy mode failures
       // This enables text-based fallback when audio evaluation fails after retries
@@ -238,6 +256,7 @@ serve(async (req) => {
           test_id: testId,
           status: 'pending',
           stage,
+          provider: currentProvider, // Set provider for routing
           file_paths: normalizedFilePaths,
           durations: durations || {},
           topic,
