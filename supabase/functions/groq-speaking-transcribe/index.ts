@@ -63,65 +63,41 @@ const HALLUCINATION_PATTERNS = [
   /^\s*,\s*$/g,            // Just a comma
 ];
 
-// Additional phrases to strip from end of transcripts (often hallucinated during silence)
-// EXPANDED: More comprehensive list based on real-world Whisper artifacts
+// Additional phrases to strip from end of transcripts - ONLY obvious hallucinations
+// CONSERVATIVE: Only remove phrases that are clearly NOT part of valid IELTS responses
+// Do NOT remove common words like "okay", "yeah", "so" which are valid speech
 const HALLUCINATION_END_PHRASES = [
-  /\s*thank\s*you\.?\s*$/gi,
-  /\s*thanks\.?\s*$/gi,
-  /\s*goodbye\.?\s*$/gi,
-  /\s*bye\.?\s*$/gi,
-  /\s*okay\.?\s*$/gi,
-  /\s*alright\.?\s*$/gi,
-  /\s*yeah\.?\s*$/gi,
-  /\s*yes\.?\s*$/gi,
-  /\s*no\.?\s*$/gi,
-  /\s*so\.?\s*$/gi,
-  /\s*and\.?\s*$/gi,
-  /\s*that's\s+it\.?\s*$/gi,
-  /\s*that's\s+all\.?\s*$/gi,
-  /\s*the\s+end\.?\s*$/gi,
-  /\s*see\s+you\.?\s*$/gi,
-  /\s*take\s+care\.?\s*$/gi,
-  /\s*have\s+a\s+nice\s+day\.?\s*$/gi,
-  /\s*good\s+luck\.?\s*$/gi,
-  /\s*i\s+hope\s+(this|that|it)\s+helps?\.?\s*$/gi,
+  /\s*thank\s*you\s+for\s+(watching|listening)\.?\s*$/gi,  // YouTube-style endings
   /\s*please\s+(subscribe|like)\.?\s*$/gi,
-  /\s*[.!?,;:]+\s*$/g,  // Trailing punctuation only
+  /\s*like\s+and\s+subscribe\.?\s*$/gi,
+  /\s*goodbye\.?\s*$/gi,  // Only "goodbye" not other common words
+  /\s*[.]{3,}\s*$/g,  // Trailing ellipsis artifacts
 ];
 
-// Leading hallucination phrases Whisper injects at the start (often from context prompt bleed)
+// Leading hallucination phrases Whisper injects at the start (from context prompt bleed)
+// CONSERVATIVE: Only remove obvious Whisper artifacts, not natural speech starters
 const HALLUCINATION_START_PHRASES = [
   /^ielts\s+speaking\s+test\.?\s*interview\.?\s*/gi,
   /^ielts\s+speaking\s+test\.?\s*/gi,
-  /^english\s+language\.?\s*/gi,
-  /^interview\.?\s*/gi,
   /^welcome\s+to\s+the\s+ielts\s+speaking\s+test\.?\s*/gi,
-  /^hello\.?\s*/gi,
-  /^hi\.?\s*/gi,
-  /^so\.?\s+/gi,  // "So," at start is often hallucinated
-  /^well\.?\s+/gi,  // "Well," at start
-  /^okay\.?\s+/gi,  // "Okay," at start
+  /^this\s+is\s+an?\s+ielts\s+speaking\.?\s*/gi,
 ];
 
 // ============================================================================
-// BULLETPROOF TRAILING HALLUCINATION DETECTION
+// CONSERVATIVE TRAILING HALLUCINATION DETECTION
 // ============================================================================
-// This addresses the core issue: Whisper often hallucinates plausible-sounding
-// sentences at the END of audio when there's trailing silence. These hallucinations
-// can have normal confidence scores because Whisper treats silence as context for
-// generating more speech.
+// This addresses trailing hallucinations WITHOUT being overly aggressive.
+// Key principle: PRESERVE VALID SPEECH. Only remove content that is CLEARLY
+// beyond the audio duration or matches known hallucination patterns.
 //
-// Solution: Use AUDIO DURATION as ground truth. If words appear AFTER the expected
-// speech should have ended (based on actual audio duration vs word timestamps),
-// they are almost certainly hallucinations.
+// We prioritize keeping user speech over aggressively filtering.
 // ============================================================================
 
-const TRAILING_HALLUCINATION_BUFFER_SECONDS = 0.5; // Allow 0.5s grace period
+const TRAILING_HALLUCINATION_BUFFER_SECONDS = 1.0; // Allow 1s grace period
 
 /**
- * Filters words that appear suspiciously late in the audio.
- * Whisper hallucinations at the end typically have timestamps that extend
- * beyond where actual speech could have occurred.
+ * CONSERVATIVE filter: Only removes words that CLEARLY extend beyond audio.
+ * Words within (audioDuration + buffer) are PRESERVED.
  */
 function filterTrailingHallucinationsByDuration(
   words: WhisperWord[], 
@@ -129,41 +105,15 @@ function filterTrailingHallucinationsByDuration(
 ): WhisperWord[] {
   if (words.length === 0 || audioDurationSeconds <= 0) return words;
   
-  // Words ending after (audioDuration + buffer) are hallucinations
+  // Only filter words that end CLEARLY after the audio (with generous buffer)
   const maxValidEndTime = audioDurationSeconds + TRAILING_HALLUCINATION_BUFFER_SECONDS;
   
-  // First pass: find the natural end of speech
-  // Look for the last word that ends BEFORE any suspicious late content
-  let naturalSpeechEnd = 0;
-  for (const word of words) {
-    if (word.end <= maxValidEndTime) {
-      naturalSpeechEnd = Math.max(naturalSpeechEnd, word.end);
-    }
-  }
-  
-  // Filter out words that start after a significant gap from natural speech end
-  // OR words that extend beyond the audio duration
-  const filtered = words.filter((word, index) => {
-    // Word extends beyond audio - definitely hallucination
+  const filtered = words.filter((word) => {
+    // Word ends clearly beyond audio duration - definitely hallucination
     if (word.end > maxValidEndTime) {
-      console.log(`[groq-speaking-transcribe] Filtering trailing word beyond audio (end=${word.end.toFixed(2)}s, audio=${audioDurationSeconds.toFixed(2)}s): "${word.word}"`);
+      console.log(`[groq-speaking-transcribe] Filtering word beyond audio (end=${word.end.toFixed(2)}s, max=${maxValidEndTime.toFixed(2)}s): "${word.word}"`);
       return false;
     }
-    
-    // Check if this word starts after a suspiciously long gap from previous content
-    // AND is in the last 20% of the audio - prime hallucination territory
-    if (index > 0) {
-      const prevWord = words[index - 1];
-      const gap = word.start - prevWord.end;
-      const positionInAudio = word.start / audioDurationSeconds;
-      
-      // Long gap (>1.5s) in final 20% of audio with low-ish confidence = likely hallucination
-      if (gap > 1.5 && positionInAudio > 0.8 && word.probability < 0.7) {
-        console.log(`[groq-speaking-transcribe] Filtering late-audio gap word (gap=${gap.toFixed(1)}s, pos=${(positionInAudio*100).toFixed(0)}%, conf=${word.probability.toFixed(2)}): "${word.word}"`);
-        return false;
-      }
-    }
-    
     return true;
   });
   
@@ -171,59 +121,21 @@ function filterTrailingHallucinationsByDuration(
 }
 
 /**
- * Detects and removes sentence-like hallucinations at the end of transcript.
- * These are complete sentences that Whisper generates during trailing silence.
+ * DISABLED: This function was too aggressive and removing valid speech.
+ * Only keeps the timestamp-based filter above which is reliable.
+ * 
+ * The previous implementation incorrectly flagged content ending after 85%
+ * of audio duration as "suspicious" - this is wrong because speech can
+ * naturally continue until the very end of the audio.
  */
 function filterTrailingSentenceHallucinations(
   text: string,
   words: WhisperWord[],
-  audioDurationSeconds: number
+  _audioDurationSeconds: number
 ): { text: string; words: WhisperWord[] } {
-  if (words.length === 0) return { text, words };
-  
-  // Find the last word that is definitely NOT a hallucination
-  // Based on: appears before 90% of audio duration AND has reasonable confidence
-  const safeThreshold = audioDurationSeconds * 0.85;
-  
-  let lastSafeWordIndex = -1;
-  for (let i = words.length - 1; i >= 0; i--) {
-    const word = words[i];
-    // Word ends well before audio ends = definitely safe
-    if (word.end <= safeThreshold) {
-      lastSafeWordIndex = i;
-      break;
-    }
-    // High confidence word near end might still be valid
-    if (word.probability > 0.85) {
-      lastSafeWordIndex = i;
-      break;
-    }
-  }
-  
-  // If we found suspicious trailing content, analyze it
-  if (lastSafeWordIndex >= 0 && lastSafeWordIndex < words.length - 1) {
-    const trailingWords = words.slice(lastSafeWordIndex + 1);
-    const trailingText = trailingWords.map(w => w.word).join(' ').trim();
-    
-    // Check if trailing content looks like a hallucinated sentence
-    const looksLikeHallucination = 
-      // Multiple words forming sentence-like structure
-      (trailingWords.length >= 3) ||
-      // Contains common hallucination phrases
-      /thank|bye|goodbye|subscribe|like|hope|help/i.test(trailingText) ||
-      // Ends with sentence-ending punctuation
-      /[.!?]$/.test(trailingText) ||
-      // Average confidence of trailing words is low
-      (trailingWords.reduce((sum, w) => sum + w.probability, 0) / trailingWords.length < 0.6);
-    
-    if (looksLikeHallucination) {
-      console.log(`[groq-speaking-transcribe] Removing trailing sentence hallucination: "${trailingText}"`);
-      const cleanedWords = words.slice(0, lastSafeWordIndex + 1);
-      const cleanedText = cleanedWords.map(w => w.word).join(' ').trim();
-      return { text: cleanedText, words: cleanedWords };
-    }
-  }
-  
+  // NO-OP: Return input unchanged. The duration-based filter above
+  // handles true trailing hallucinations (words beyond audio end).
+  // This function was causing empty transcripts by being too aggressive.
   return { text, words };
 }
 
