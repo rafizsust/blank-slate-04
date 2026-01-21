@@ -551,11 +551,28 @@ function roundIELTSBand(rawAverage: number): number {
 // ============================================================================
 
 function estimatePronunciation(transcriptions: TranscriptionSegment[]): PronunciationEstimate {
+  // CRITICAL: If no transcriptions or no/minimal speech, return LOW score
+  // This ensures consistency with other criteria when there's no speech to evaluate
   if (!transcriptions.length) {
-    return { estimatedBand: 5.0, confidence: 'low', evidence: ['No transcription data available'] };
+    return { estimatedBand: 2.0, confidence: 'low', evidence: ['No transcription data available - cannot evaluate pronunciation'] };
   }
 
   const totalWords = transcriptions.reduce((sum, t) => sum + t.wordCount, 0);
+  
+  // CRITICAL FIX: If minimal words (<20), pronunciation cannot be properly evaluated
+  // Return a low score that's consistent with other criteria scores
+  if (totalWords < 20) {
+    return { 
+      estimatedBand: 2.0, 
+      confidence: 'low', 
+      evidence: [
+        `Insufficient speech to evaluate pronunciation (${totalWords} words detected)`,
+        'Minimum ~50 words needed for reliable pronunciation assessment',
+        'Score reflects inability to demonstrate pronunciation skills'
+      ] 
+    };
+  }
+
   const weightedConfidence = transcriptions.reduce((sum, t) => sum + (t.avgConfidence * t.wordCount), 0) / Math.max(1, totalWords);
   const avgLogprob = transcriptions.reduce((sum, t) => sum + t.avgLogprob, 0) / transcriptions.length;
   const totalFillerWords = transcriptions.reduce((sum, t) => sum + t.fillerWords.length, 0);
