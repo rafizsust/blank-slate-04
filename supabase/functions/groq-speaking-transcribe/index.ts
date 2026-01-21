@@ -575,8 +575,30 @@ async function transcribeWithWhisper(
 
   const result: WhisperResponse = await response.json();
   const processingTime = Date.now() - startTime;
+  const shortAudioDuration = typeof result.duration === 'number' ? result.duration : 0;
 
-  console.log(`[groq-speaking-transcribe] ${segmentKey} transcribed in ${processingTime}ms, ${result.duration?.toFixed(1)}s audio`);
+  console.log(`[groq-speaking-transcribe] ${segmentKey} transcribed in ${processingTime}ms, ${shortAudioDuration.toFixed(1)}s audio`);
+
+  // CRITICAL: If audio duration is essentially zero (<0.5s), return empty transcript
+  // Whisper hallucinates garbage on silent/empty audio files
+  if (shortAudioDuration < 0.5) {
+    console.log(`[groq-speaking-transcribe] Audio too short (${shortAudioDuration.toFixed(2)}s), returning empty transcript to avoid hallucinations`);
+    return {
+      segmentKey,
+      partNumber,
+      questionNumber,
+      text: '',
+      duration: shortAudioDuration,
+      segments: [],
+      words: [],
+      avgConfidence: 0,
+      avgLogprob: 0,
+      fillerWords: [],
+      longPauses: [],
+      wordCount: 0,
+      noSpeechProb: 1.0,
+    };
+  }
 
   // Calculate average no_speech_prob across all segments
   const avgNoSpeechProb = result.segments?.length > 0
